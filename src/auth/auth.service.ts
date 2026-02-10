@@ -3,16 +3,23 @@ import {
   Injectable,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { CreateUserDto } from './dto';
 import { InjectModel } from '@nestjs/mongoose';
-import { User } from './entities/user.entity';
+import { JwtService } from '@nestjs/jwt';
+
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
+
+import { User } from './entities/user.entity';
+import { CreateUserDto } from './dto';
+import { JwtPayload } from './interfaces';
+
 @Injectable()
 export class AuthService {
   constructor(
     @InjectModel(User.name)
     private userModel: Model<User>,
+
+    private readonly jwtService: JwtService,
   ) {}
 
   async create(createUserDto: CreateUserDto) {
@@ -23,7 +30,10 @@ export class AuthService {
         password: bcrypt.hashSync(password, 10),
       });
 
-      return createdUser;
+      return {
+        ...createdUser.toObject(),
+        token: this.getJwtToken({ id: createdUser._id.toHexString() }),
+      };
     } catch (error) {
       this.handleExceptions(error);
     }
@@ -49,5 +59,11 @@ export class AuthService {
     throw new InternalServerErrorException(
       `Can't create User - Check server logs`,
     );
+  }
+
+  private getJwtToken(payload: JwtPayload) {
+    const token = this.jwtService.sign(payload);
+
+    return token;
   }
 }
