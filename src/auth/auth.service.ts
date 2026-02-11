@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
@@ -10,7 +11,7 @@ import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 
 import { User } from './entities/user.entity';
-import { CreateUserDto } from './dto';
+import { CreateUserDto, LoginUserDto } from './dto';
 import { JwtPayload } from './interfaces';
 
 @Injectable()
@@ -25,31 +26,48 @@ export class AuthService {
   async create(createUserDto: CreateUserDto) {
     const { password, ...userData } = createUserDto;
     try {
+      const hashedPassword = await bcrypt.hash(password, 10);
+
       const createdUser = await this.userModel.create({
         ...userData,
-        password: bcrypt.hashSync(password, 10),
+        password: hashedPassword,
       });
 
+      const { email, fullName } = createdUser;
+
       return {
-        ...createdUser.toObject(),
+        fullName,
+        email,
         token: this.getJwtToken({ id: createdUser._id.toHexString() }),
       };
     } catch (error) {
       this.handleExceptions(error);
     }
   }
-  // findAll() {
-  //   return `This action returns all auth`;
-  // }
-  // findOne(id: number) {
-  //   return `This action returns a #${id} auth`;
-  // }
-  // update(id: number, updateAuthDto: UpdateAuthDto) {
-  //   return `This action updates a #${id} auth`;
-  // }
-  // remove(id: number) {
-  //   return `This action removes a #${id} auth`;
-  // }
+
+  async login(loginUserDto: LoginUserDto) {
+    const { email, password } = loginUserDto;
+
+    const user = await this.userModel
+      .findOne({
+        email,
+      })
+      .exec();
+
+    if (!user)
+      throw new UnauthorizedException('Credentials are not valid (email)');
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
+
+    if (!isValidPassword)
+      throw new UnauthorizedException('Credentials are not valid (password)');
+
+    return {
+      fullName: user.fullName,
+      token: this.getJwtToken({ id: user._id.toHexString() }),
+    };
+  }
+
   private handleExceptions(error: any) {
     if (error.code === 11000) {
       throw new BadRequestException(
