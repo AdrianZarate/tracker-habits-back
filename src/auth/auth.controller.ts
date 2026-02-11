@@ -9,6 +9,9 @@ import {
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { CreateUserDto, LoginUserDto } from './dto';
+import { User } from './entities/user.entity';
+import { Auth, GetUser } from './decorators';
+import { ValidRoles } from './interfaces';
 
 @Controller('auth')
 export class AuthController {
@@ -24,10 +27,11 @@ export class AuthController {
     return this.authService.login(loginUserDto);
   }
 
-  // @Get()
-  // findAll() {
-  //   return this.authService.findAll();
-  // }
+  @Get('check-status')
+  @Auth()
+  checkAuthStatus(@GetUser() user: User) {
+    return this.authService.checkAuthStatus(user);
+  }
 
   // @Get(':id')
   // findOne(@Param('id') id: string) {

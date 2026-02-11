@@ -52,6 +52,7 @@ export class AuthService {
       .findOne({
         email,
       })
+      .lean()
       .exec();
 
     if (!user)
@@ -66,6 +67,10 @@ export class AuthService {
       fullName: user.fullName,
       token: this.getJwtToken({ id: user._id.toHexString() }),
     };
+  }
+
+  checkAuthStatus(user: User) {
+    return { ...user, token: this.getJwtToken({ id: user._id.toHexString() }) };
   }
 
   private handleExceptions(error: any) {
