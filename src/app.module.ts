@@ -1,9 +1,12 @@
 import { Module } from '@nestjs/common';
-import { AuthModule } from './auth/auth.module';
+import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule } from '@nestjs/config';
+
+import { AuthModule } from './auth/auth.module';
 import { envConfig } from './config/env.config';
 import { joiValidationSchema } from './config/joi.validation';
-import { MongooseModule } from '@nestjs/mongoose';
+import { HabitsModule } from './habits/habits.module';
+import { CommonModule } from './common/common.module';
 
 @Module({
   imports: [
@@ -17,6 +20,10 @@ import { MongooseModule } from '@nestjs/mongoose';
     }),
 
     AuthModule,
+
+    HabitsModule,
+
+    CommonModule,
   ],
   controllers: [],
   providers: [],

@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  InternalServerErrorException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
 
@@ -13,6 +8,7 @@ import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
 import { CreateUserDto, LoginUserDto } from './dto';
 import { JwtPayload } from './interfaces';
+import { CommonService } from 'src/common/common.service';
 
 @Injectable()
 export class AuthService {
@@ -21,6 +17,8 @@ export class AuthService {
     private userModel: Model<User>,
 
     private readonly jwtService: JwtService,
+
+    private readonly commonService: CommonService,
   ) {}
 
   async create(createUserDto: CreateUserDto) {
@@ -41,7 +39,7 @@ export class AuthService {
         token: this.getJwtToken({ id: createdUser._id.toHexString() }),
       };
     } catch (error) {
-      this.handleExceptions(error);
+      this.commonService.handleExceptions(error, 'User');
     }
   }
 
@@ -71,17 +69,6 @@ export class AuthService {
 
   checkAuthStatus(user: User) {
     return { ...user, token: this.getJwtToken({ id: user._id.toHexString() }) };
-  }
-
-  private handleExceptions(error: any) {
-    if (error.code === 11000) {
-      throw new BadRequestException(
-        `User exists in db ${JSON.stringify(error.keyValue)}`,
-      );
-    }
-    throw new InternalServerErrorException(
-      `Can't create User - Check server logs`,
-    );
   }
 
   private getJwtToken(payload: JwtPayload) {

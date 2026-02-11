@@ -2,12 +2,13 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { PassportModule } from '@nestjs/passport';
 
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { UserSchema } from './entities/user.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { PassportModule } from '@nestjs/passport';
+import { CommonModule } from 'src/common/common.module';
 
 @Module({
   controllers: [AuthController],
@@ -28,6 +29,7 @@ import { PassportModule } from '@nestjs/passport';
         };
       },
     }),
+    CommonModule,
   ],
   exports: [MongooseModule, JwtModule, PassportModule, JwtStrategy],
 })
