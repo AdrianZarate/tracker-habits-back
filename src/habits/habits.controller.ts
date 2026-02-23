@@ -9,9 +9,10 @@ import {
 } from '@nestjs/common';
 import { HabitsService } from './habits.service';
 import { CreateHabitDto } from './dto/create-habit.dto';
-import { UpdateHabitDto } from './dto/update-habit.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
 import { User } from 'src/auth/entities/user.entity';
+import { UpdateHabitUserDto } from './dto';
+import { ParseMongoIdPipe } from 'src/common/pipes/parse-mongo-id.pipe';
 
 @Controller('habits')
 export class HabitsController {
@@ -34,10 +35,14 @@ export class HabitsController {
   //   return this.habitsService.findOne(+id);
   // }
 
-  // @Patch(':id')
-  // update(@Param('id') id: string, @Body() updateHabitDto: UpdateHabitDto) {
-  //   return this.habitsService.update(+id, updateHabitDto);
-  // }
+  @Patch(':habitId')
+  @Auth()
+  update(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.update(habitId, user);
+  }
 
   // @Delete(':id')
   // remove(@Param('id') id: string) {

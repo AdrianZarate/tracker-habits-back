@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 
 import { Model, Types } from 'mongoose';
@@ -8,8 +12,8 @@ import { CommonService } from 'src/common/common.service';
 import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
-import { UpdateHabitDto } from './dto/update-habit.dto';
 import { Habit, HabitUser } from './entities';
+import { UpdateHabitUserDto } from './dto';
 
 @Injectable()
 export class HabitsService {
@@ -99,9 +103,29 @@ export class HabitsService {
   //   return `This action returns a #${id} habit`;
   // }
 
-  // update(id: number, updateHabitDto: UpdateHabitDto) {
-  //   return `This action updates a #${id} habit`;
-  // }
+  async update(habitId: string, user: User) {
+    const habitUser = await this.habitUserModel
+      .findOneAndUpdate(
+        {
+          userId: user._id,
+          habitId: new Types.ObjectId(habitId),
+        },
+        {
+          active: false,
+        },
+        {
+          returnDocument: 'after',
+        },
+      )
+      .lean()
+      .exec();
+
+    if (!habitUser) {
+      throw new NotFoundException('Habit not found for this user');
+    }
+
+    return habitUser;
+  }
 
   // remove(id: number) {
   //   return `This action removes a #${id} habit`;
