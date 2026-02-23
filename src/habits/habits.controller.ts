@@ -23,10 +23,11 @@ export class HabitsController {
     return this.habitsService.create(createHabitDto, user);
   }
 
-  // @Get()
-  // findAll() {
-  //   return this.habitsService.findAll();
-  // }
+  @Get()
+  @Auth()
+  findAll(@GetUser() user: User) {
+    return this.habitsService.findAllByUser(user);
+  }
 
   // @Get(':id')
   // findOne(@Param('id') id: string) {

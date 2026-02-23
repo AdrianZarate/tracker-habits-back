@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import slugify from 'slugify';
 
 import { CommonService } from 'src/common/common.service';
@@ -30,7 +30,7 @@ export class HabitsService {
     });
 
     try {
-      // 1️⃣ Obtener o crear hábito global
+      // 1️ Obtener o crear hábito global
       const habit = await this.habitModel.findOneAndUpdate(
         // Busca por slug para evitar duplicados y mantener consistencia
         { slug },
@@ -45,7 +45,7 @@ export class HabitsService {
         },
       );
 
-      // 2️⃣ Crear o reactivar relación usuario-hábito
+      // 2️ Crear o reactivar relación usuario-hábito
       const habitUser = await this.habitUserModel.findOneAndUpdate(
         {
           userId: user._id,
@@ -67,9 +67,33 @@ export class HabitsService {
     }
   }
 
-  // findAll() {
-  //   return `This action returns all habits`;
-  // }
+  async findAllByUser(user: User) {
+    return this.habitUserModel.aggregate([
+      {
+        $match: {
+          userId: new Types.ObjectId(user._id),
+          active: true,
+        },
+      },
+      {
+        $lookup: {
+          from: 'habits',
+          localField: 'habitId',
+          foreignField: '_id',
+          as: 'habit',
+        },
+      },
+      { $unwind: '$habit' },
+      {
+        $project: {
+          _id: 0,
+          habitId: '$habit._id',
+          title: '$habit.title',
+          slug: '$habit.slug',
+        },
+      },
+    ]);
+  }
 
   // findOne(id: number) {
   //   return `This action returns a #${id} habit`;
