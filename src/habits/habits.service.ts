@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 
 import { Model, Types } from 'mongoose';
@@ -8,6 +12,7 @@ import { CommonService } from 'src/common/common.service';
 import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
+import { GetLogsDto } from './dto/get-logs.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
 
 @Injectable()
@@ -156,6 +161,38 @@ export class HabitsService {
       .exec();
 
     return habitLog;
+  }
+
+  async getLogs(habitId: string, user: User, getLogsDto: GetLogsDto) {
+    const now = new Date();
+
+    const startDate = getLogsDto.startDate
+      ? this.normalizeDate(new Date(getLogsDto.startDate))
+      : this.normalizeDate(
+          new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+        );
+
+    const endDate = getLogsDto.endDate
+      ? this.normalizeDate(new Date(getLogsDto.endDate))
+      : this.normalizeDate(
+          new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)),
+        );
+
+    if (startDate > endDate) {
+      throw new BadRequestException('Invalid date range');
+    }
+
+    return await this.habitLogModel
+      .find({
+        userId: user._id,
+        habitId: new Types.ObjectId(habitId),
+        date: {
+          $gte: startDate,
+          $lte: endDate,
+        },
+      })
+      .lean()
+      .exec();
   }
 
   private normalizeDate(date: Date) {
