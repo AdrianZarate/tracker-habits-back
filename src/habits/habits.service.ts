@@ -200,4 +200,14 @@ export class HabitsService {
       Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
     );
   }
+
+  async deleteHabitLog(habitId: string, user: User) {
+    const today = this.normalizeDate(new Date());
+
+    return await this.habitLogModel.deleteOne({
+      userId: user._id,
+      habitId: new Types.ObjectId(habitId),
+      date: today,
+    });
+  }
 }

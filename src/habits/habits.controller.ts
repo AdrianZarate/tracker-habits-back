@@ -4,6 +4,7 @@ import {
   Post,
   Body,
   Patch,
+  Delete,
   Param,
   Query,
 } from '@nestjs/common';
@@ -52,5 +53,13 @@ export class HabitsController {
     @GetUser() user: User,
   ) {
     return this.habitsService.getLogs(habitId, user, getLogsDto);
+  }
+
+  @Delete(':habitId/incomplete')
+  incomplete(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.deleteHabitLog(habitId, user);
   }
 }
