@@ -1,17 +1,8 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Patch,
-  Param,
-  Delete,
-} from '@nestjs/common';
+import { Controller, Get, Post, Body, Patch, Param } from '@nestjs/common';
 import { HabitsService } from './habits.service';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
 import { User } from 'src/auth/entities/user.entity';
-import { UpdateHabitUserDto } from './dto';
 import { ParseMongoIdPipe } from 'src/common/pipes/parse-mongo-id.pipe';
 
 @Controller('habits')
@@ -30,11 +21,6 @@ export class HabitsController {
     return this.habitsService.findAllByUser(user);
   }
 
-  // @Get(':id')
-  // findOne(@Param('id') id: string) {
-  //   return this.habitsService.findOne(+id);
-  // }
-
   @Patch(':habitId')
   @Auth()
   update(
@@ -44,8 +30,12 @@ export class HabitsController {
     return this.habitsService.update(habitId, user);
   }
 
-  // @Delete(':id')
-  // remove(@Param('id') id: string) {
-  //   return this.habitsService.remove(+id);
-  // }
+  @Post(':habitId/complete')
+  @Auth()
+  complete(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.complete(habitId, user);
+  }
 }

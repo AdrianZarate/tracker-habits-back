@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 
 import { Model, Types } from 'mongoose';
@@ -12,8 +8,7 @@ import { CommonService } from 'src/common/common.service';
 import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
-import { Habit, HabitUser } from './entities';
-import { UpdateHabitUserDto } from './dto';
+import { Habit, HabitLog, HabitUser } from './entities';
 
 @Injectable()
 export class HabitsService {
@@ -22,6 +17,8 @@ export class HabitsService {
     private readonly habitModel: Model<Habit>,
     @InjectModel('HabitUser')
     private readonly habitUserModel: Model<HabitUser>,
+    @InjectModel('HabitLog')
+    private readonly habitLogModel: Model<HabitLog>,
 
     private readonly commonService: CommonService,
   ) {}
@@ -99,10 +96,6 @@ export class HabitsService {
     ]);
   }
 
-  // findOne(id: number) {
-  //   return `This action returns a #${id} habit`;
-  // }
-
   async update(habitId: string, user: User) {
     const habitUser = await this.habitUserModel
       .findOneAndUpdate(
@@ -127,7 +120,47 @@ export class HabitsService {
     return habitUser;
   }
 
-  // remove(id: number) {
-  //   return `This action removes a #${id} habit`;
-  // }
+  async complete(habitId: string, user: User) {
+    const today = this.normalizeDate(new Date());
+
+    // 1️ Verificar que el hábito pertenece al usuario y está activo
+    const habitUser = await this.habitUserModel
+      .findOne({
+        userId: user._id,
+        habitId: new Types.ObjectId(habitId),
+        active: true,
+      })
+      .lean();
+
+    if (!habitUser) {
+      throw new NotFoundException('Habit not active for this user');
+    }
+
+    // 2️ Upsert para evitar duplicados
+    const habitLog = await this.habitLogModel
+      .findOneAndUpdate(
+        {
+          userId: user._id,
+          habitId: new Types.ObjectId(habitId),
+          date: today,
+        },
+        {
+          completed: true,
+        },
+        {
+          upsert: true,
+          returnDocument: 'after',
+        },
+      )
+      .lean()
+      .exec();
+
+    return habitLog;
+  }
+
+  private normalizeDate(date: Date) {
+    return new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
+  }
 }

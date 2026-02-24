@@ -24,3 +24,7 @@ export class HabitUser extends Document {
 }
 
 export const HabitUserSchema = SchemaFactory.createForClass(HabitUser);
+
+// Índice compuesto para las queries más frecuentes
+HabitUserSchema.index({ userId: 1, habitId: 1 }, { unique: true });
+HabitUserSchema.index({ userId: 1, active: 1 });
