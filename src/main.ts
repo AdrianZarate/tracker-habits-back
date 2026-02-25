@@ -7,7 +7,7 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   app.enableCors({
-    origin: ['https://tracker-habit.alexadrian.dev'],
+    origin: ['https://tracker-habits.alexadrian.dev'],
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
