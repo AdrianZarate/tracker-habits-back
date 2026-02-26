@@ -2,97 +2,252 @@
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+# 📊 Habit Tracker API
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+API RESTful para el seguimiento y gestión de hábitos personales, desarrollada con NestJS, MongoDB y JWT para autenticación.
 
-## Description
+## ✨ Características
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- 🔐 Autenticación JWT con registro y login de usuarios
+- ✅ Crear y gestionar hábitos personalizados
+- 📝 Marcar hábitos como completados/incompletos
+- 📊 Visualizar registros (logs) de hábitos por fecha
+- 🔒 Endpoints protegidos con guards de autenticación
+- 📖 Documentación interactiva con Swagger
+- 🐳 Configuración Docker para MongoDB
+- 🌐 CORS configurado para múltiples orígenes
 
-## Project setup
+## 📋 Requisitos Previos
+
+- [Node.js](https://nodejs.org/) (v18 o superior)
+- [Yarn](https://yarnpkg.com/) o npm
+- [Docker](https://www.docker.com/) y Docker Compose (para MongoDB)
+- [MongoDB](https://www.mongodb.com/) (si no usas Docker)
+
+## 🚀 Instalación
+
+1. **Clonar el repositorio**
+
+   ```bash
+   git clone <url-del-repositorio>
+   cd habit-tracker
+   ```
+
+2. **Instalar dependencias**
+
+   ```bash
+   yarn install
+   # o
+   npm install
+   ```
+
+3. **Configurar variables de entorno**
+
+   Crear un archivo `.env` en la raíz del proyecto con las siguientes variables:
+
+   ```env
+   # Entorno
+   NODE_ENV=development
+
+   # Puerto del servidor
+   PORT=3000
+
+   # MongoDB
+   MONGODB=mongodb://localhost:27017/habit-tracker
+
+   # JWT Secret
+   JWT_SECRET=tu_clave_secreta_super_segura_aqui
+   ```
+
+4. **Iniciar MongoDB con Docker**
+   ```bash
+   docker-compose up -d
+   ```
+
+## 🏃‍♂️ Ejecución del Proyecto
+
+### Modo Desarrollo
 
 ```bash
-$ yarn install
+yarn start:dev
 ```
 
-## Compile and run the project
+El servidor se iniciará en `http://localhost:3000` (o el puerto configurado en `.env`)
+
+### Modo Producción
 
 ```bash
-# development
-$ yarn run start
+# Construir
+yarn build
 
-# watch mode
-$ yarn run start:dev
-
-# production mode
-$ yarn run start:prod
+# Ejecutar
+yarn start:prod
 ```
 
-## Run tests
+### Modo Debug
 
 ```bash
-# unit tests
-$ yarn run test
-
-# e2e tests
-$ yarn run test:e2e
-
-# test coverage
-$ yarn run test:cov
+yarn start:debug
 ```
 
-## Deployment
+## 🐳 Docker
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Iniciar MongoDB
 
 ```bash
-$ yarn install -g @nestjs/mau
-$ mau deploy
+docker-compose up -d
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Detener MongoDB
 
-## Resources
+```bash
+docker-compose down
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+### Ver logs
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+docker-compose logs -f
+```
 
-## Support
+## 📖 Documentación de la API (Swagger)
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+Una vez iniciado el servidor, accede a la documentación interactiva en:
 
-## Stay in touch
+```
+http://localhost:3000/api
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+### Autenticación en Swagger
 
-## License
+1. Usa el endpoint `/auth/login` o `/auth/register` para obtener un token JWT
+2. Copia el token de la respuesta
+3. Haz clic en el botón **"Authorize" 🔓** en la parte superior derecha
+4. Pega el token (sin incluir la palabra "Bearer")
+5. Clic en "Authorize" y luego "Close"
+6. Ahora puedes probar todos los endpoints protegidos
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## 📁 Estructura del Proyecto
+
+```
+habit-tracker/
+├── src/
+│   ├── auth/                    # Módulo de autenticación
+│   │   ├── decorators/          # Decoradores personalizados (@Auth, @GetUser)
+│   │   ├── dto/                 # DTOs para login y registro
+│   │   ├── entities/            # Entidad de usuario
+│   │   ├── guards/              # Guards de autorización por roles
+│   │   ├── interface/           # Interfaces
+│   │   ├── strategies/          # Estrategia JWT de Passport
+│   │   └── auth.service.ts      # Lógica de autenticación
+│   ├── common/                  # Recursos compartidos
+│   │   └── pipes/               # Pipes personalizados (ParseMongoId)
+│   ├── config/                  # Configuración de variables de entorno
+│   ├── habits/                  # Módulo de hábitos
+│   │   ├── dto/                 # DTOs para hábitos y logs
+│   │   ├── entities/            # Entidades (Habit, HabitUser, HabitLog)
+│   │   └── habits.service.ts    # Lógica de negocio de hábitos
+│   ├── app.module.ts            # Módulo principal
+│   └── main.ts                  # Punto de entrada de la aplicación
+├── test/                        # Tests e2e
+├── mongo/                       # Datos persistentes de MongoDB (Docker)
+├── docker-compose.yaml          # Configuración de Docker
+└── package.json
+```
+
+## 🛠️ Tecnologías Utilizadas
+
+- **Framework**: [NestJS](https://nestjs.com/) v11
+- **Base de datos**: [MongoDB](https://www.mongodb.com/) con [Mongoose](https://mongoosejs.com/)
+- **Autenticación**: JWT con [Passport](http://www.passportjs.org/)
+- **Documentación**: [Swagger](https://swagger.io/) / OpenAPI
+- **Validación**: [class-validator](https://github.com/typestack/class-validator) y [class-transformer](https://github.com/typestack/class-transformer)
+- **Encriptación**: [bcrypt](https://www.npmjs.com/package/bcrypt)
+- **Testing**: [Jest](https://jestjs.io/)
+
+## 🔑 Autenticación y Autorización
+
+La API utiliza JSON Web Tokens (JWT) para autenticación. Todos los endpoints de hábitos requieren autenticación.
+
+### Flujo de autenticación:
+
+1. **Registro**: `POST /auth/register`
+
+   ```json
+   {
+     "email": "usuario@example.com",
+     "password": "password123",
+     "fullName": "Nombre Completo"
+   }
+   ```
+
+2. **Login**: `POST /auth/login`
+
+   ```json
+   {
+     "email": "usuario@example.com",
+     "password": "password123"
+   }
+   ```
+
+   Respuesta:
+
+   ```json
+   {
+     "user": { ... },
+     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+   }
+   ```
+
+3. **Uso del token**: Incluye el token en el header `Authorization`:
+   ```
+   Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+   ```
+
+## 📌 Endpoints Principales
+
+### Autenticación
+
+- `POST /auth/register` - Registrar nuevo usuario
+- `POST /auth/login` - Iniciar sesión
+- `GET /auth/check-status` - Verificar estado de autenticación (requiere token)
+
+### Hábitos (todos requieren autenticación)
+
+- `POST /habits` - Crear nuevo hábito
+- `GET /habits` - Obtener todos los hábitos del usuario
+- `PATCH /habits/:habitId` - Actualizar un hábito
+- `POST /habits/:habitId/complete` - Marcar hábito como completado
+- `DELETE /habits/:habitId/incomplete` - Eliminar registro de completado
+- `GET /habits/:habitId/logs` - Obtener logs de un hábito específico
+- `GET /habits/logs` - Obtener todos los logs del usuario
+
+## 🌐 CORS
+
+El servidor está configurado para aceptar peticiones desde:
+
+- `https://tracker-habits.alexadrian.dev`
+- `https://dynamic-nasturtium-c7a358.netlify.app`
+- `http://localhost:5173`
+
+Para modificar los orígenes permitidos, edita el array `origin` en [src/main.ts](src/main.ts).
+
+## 🤝 Contribución
+
+1. Fork el proyecto
+2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
+3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abre un Pull Request
+
+## 📄 Licencia
+
+Este proyecto es privado y está bajo licencia UNLICENSED.
+
+## 👨‍💻 Soporte
+
+Para preguntas o problemas, abre un issue en el repositorio.
+
+---
+
+Desarrollado con ❤️ usando [NestJS](https://nestjs.com/)
