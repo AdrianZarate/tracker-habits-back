@@ -7,7 +7,11 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   app.enableCors({
-    origin: ['https://tracker-habits.alexadrian.dev'],
+    origin: [
+      'https://tracker-habits.alexadrian.dev',
+      'https://dynamic-nasturtium-c7a358.netlify.app',
+      'http://localhost:5173',
+    ],
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
