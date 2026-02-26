@@ -62,4 +62,9 @@ export class HabitsController {
   ) {
     return this.habitsService.deleteHabitLog(habitId, user);
   }
+
+  @Get('logs')
+  getLogsByUser(@GetUser() user: User) {
+    return this.habitsService.getLogsByUser(user);
+  }
 }

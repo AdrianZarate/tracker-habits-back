@@ -210,4 +210,34 @@ export class HabitsService {
       date: today,
     });
   }
+
+  async getLogsByUser(user: User) {
+    return await this.habitLogModel.aggregate([
+      {
+        $match: {
+          userId: new Types.ObjectId(user._id),
+        },
+      },
+      {
+        $lookup: {
+          from: 'habits',
+          localField: 'habitId',
+          foreignField: '_id',
+          as: 'habit',
+        },
+      },
+      { $unwind: '$habit' },
+      {
+        $project: {
+          _id: 1,
+          habitId: '$habit._id',
+          title: '$habit.title',
+          slug: '$habit.slug',
+          date: 1,
+          completed: 1,
+        },
+      },
+      { $sort: { date: -1 } },
+    ]);
+  }
 }
