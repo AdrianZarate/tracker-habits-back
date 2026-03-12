@@ -1,69 +1,61 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import { OAuth2Client } from 'google-auth-library';
 
 import { Model } from 'mongoose';
-import * as bcrypt from 'bcrypt';
 
 import { User } from './entities/user.entity';
-import { CreateUserDto, LoginUserDto } from './dto';
+import { GoogleAuthDto } from './dto';
 import { JwtPayload } from './interfaces';
-import { CommonService } from 'src/common/common.service';
 
 @Injectable()
 export class AuthService {
+  private googleClient: OAuth2Client;
+
   constructor(
     @InjectModel(User.name)
     private userModel: Model<User>,
 
     private readonly jwtService: JwtService,
 
-    private readonly commonService: CommonService,
-  ) {}
-
-  async create(createUserDto: CreateUserDto) {
-    const { password, ...userData } = createUserDto;
-    try {
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      const createdUser = await this.userModel.create({
-        ...userData,
-        password: hashedPassword,
-      });
-
-      const { email, fullName } = createdUser;
-
-      return {
-        fullName,
-        email,
-        token: this.getJwtToken({ id: createdUser._id.toHexString() }),
-      };
-    } catch (error) {
-      this.commonService.handleExceptions(error, 'User');
-    }
+    private readonly configService: ConfigService,
+  ) {
+    this.googleClient = new OAuth2Client(
+      this.configService.getOrThrow<string>('GOOGLE_CLIENT_ID'),
+    );
   }
 
-  async login(loginUserDto: LoginUserDto) {
-    const { email, password } = loginUserDto;
-
-    const user = await this.userModel
-      .findOne({
-        email,
+  async googleAuth({ idToken }: GoogleAuthDto) {
+    const ticket = await this.googleClient
+      .verifyIdToken({
+        idToken,
+        audience: this.configService.getOrThrow<string>('GOOGLE_CLIENT_ID'),
       })
-      .lean()
-      .exec();
+      .catch(() => {
+        throw new UnauthorizedException('Google token no válido');
+      });
 
-    if (!user)
-      throw new UnauthorizedException('Credentials are not valid (email)');
+    const payload = ticket.getPayload();
+    if (!payload || !payload.sub || !payload.email) {
+      throw new UnauthorizedException('No se pudo obtener la información del usuario de Google');
+    }
 
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const { sub: googleId, email, name: fullName = '', picture = '' } = payload;
 
-    if (!isValidPassword)
-      throw new UnauthorizedException('Credentials are not valid (password)');
+    let user = await this.userModel.findOne({ googleId }).lean().exec();
+
+    if (!user) {
+      user = await this.userModel.create({ googleId, email, fullName, picture });
+      user = (await this.userModel.findById(user._id).lean().exec())!;
+    }
 
     return {
       fullName: user.fullName,
-      token: this.getJwtToken({ id: user._id.toHexString() }),
+      email: user.email,
+      picture: user.picture,
+      token: this.getJwtToken({ id: (user._id as any).toHexString() }),
     };
   }
 
@@ -72,8 +64,7 @@ export class AuthService {
   }
 
   private getJwtToken(payload: JwtPayload) {
-    const token = this.jwtService.sign(payload);
-
-    return token;
+    return this.jwtService.sign(payload);
   }
 }
+

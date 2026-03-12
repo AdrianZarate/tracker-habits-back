@@ -1,7 +1,7 @@
-import { Controller, Get, Post, Body } from '@nestjs/common';
+import { Controller, Post, Body, Get } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
-import { CreateUserDto, LoginUserDto } from './dto';
+import { GoogleAuthDto } from './dto';
 import { User } from './entities/user.entity';
 import { Auth, GetUser } from './decorators';
 
@@ -10,16 +10,10 @@ import { Auth, GetUser } from './decorators';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  @Post('register')
-  @ApiOperation({ summary: 'Registrar un nuevo usuario' })
-  create(@Body() createUserDto: CreateUserDto) {
-    return this.authService.create(createUserDto);
-  }
-
-  @Post('login')
-  @ApiOperation({ summary: 'Iniciar sesión' })
-  loginUser(@Body() loginUserDto: LoginUserDto) {
-    return this.authService.login(loginUserDto);
+  @Post('google')
+  @ApiOperation({ summary: 'Iniciar sesión o registrarse con Google' })
+  googleAuth(@Body() googleAuthDto: GoogleAuthDto) {
+    return this.authService.googleAuth(googleAuthDto);
   }
 
   @Get('check-status')

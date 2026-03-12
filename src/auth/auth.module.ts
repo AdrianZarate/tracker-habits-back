@@ -8,7 +8,6 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { UserSchema } from './entities/user.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { CommonModule } from 'src/common/common.module';
 
 @Module({
   controllers: [AuthController],
@@ -17,7 +16,7 @@ import { CommonModule } from 'src/common/common.module';
     ConfigModule,
     MongooseModule.forFeature([{ name: 'User', schema: UserSchema }]),
 
-    PassportModule.register({ defaultStrategy: 'jwt' }), // se registra el modulo de passport para poder usarlo en el guard de jwt
+    PassportModule.register({ defaultStrategy: 'jwt' }),
 
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -29,7 +28,6 @@ import { CommonModule } from 'src/common/common.module';
         };
       },
     }),
-    CommonModule,
   ],
   exports: [MongooseModule, JwtModule, PassportModule, JwtStrategy],
 })
