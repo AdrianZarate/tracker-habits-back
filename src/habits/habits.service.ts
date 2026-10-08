@@ -17,6 +17,7 @@ import {
 import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
+import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
@@ -26,6 +27,7 @@ import {
   legacyConfiguration,
   nextCalendarDay,
   parseConfiguration,
+  resolveConfigurationForDate,
 } from './configuration/habit-configuration';
 
 type HabitListRow = Pick<
@@ -35,7 +37,10 @@ type HabitListRow = Pick<
   Pick<Habit, 'slug'>;
 
 /** Shape produced by the global-habit lookup and log projection below. */
-type HabitLogSummary = Pick<HabitLog, 'date' | 'completed'> &
+type HabitLogSummary = Pick<
+  HabitLog,
+  'date' | 'completed' | 'amount' | 'configurationSnapshot'
+> &
   Pick<Habit, 'title' | 'slug'> & {
     _id: Types.ObjectId;
     habitId: Types.ObjectId;
@@ -291,42 +296,101 @@ export class HabitsService {
     return this.associationView(habitUser, today);
   }
 
-  async complete(habitId: string, user: User) {
-    const today = this.todayAnchor(user);
-
-    // 1️ Verificar que el hábito pertenece al usuario y está activo
+  async complete(habitId: string, user: User, dto: CompleteHabitDto = {}) {
+    // Capture the account day once, before any awaited read or write.
+    const day = calendarDay(new Date(), user.timeZone ?? 'UTC');
+    const filter = {
+      userId: user._id,
+      habitId: new Types.ObjectId(habitId),
+      date: dayLabelToUtcAnchor(day),
+    };
     const habitUser = await this.habitUserModel
-      .findOne({
-        userId: user._id,
-        habitId: new Types.ObjectId(habitId),
-        active: true,
-      })
+      .findOne({ userId: filter.userId, habitId: filter.habitId, active: true })
       .lean();
-
     if (!habitUser) {
       throw new NotFoundException('Habit not active for this user');
     }
 
-    // 2️ Upsert para evitar duplicados
-    const habitLog = await this.habitLogModel
+    let log = await this.habitLogModel.findOne(filter).lean();
+    const resolved = () =>
+      resolveConfigurationForDate(habitUser.configurationRevisions, day);
+    if (!log) {
+      const snapshot = resolved();
+      const progress = this.completionProgress(dto, snapshot.configuration);
+      const schedule = snapshot.configuration.schedule;
+      const weekday = filter.date.getUTCDay() || 7;
+      if (schedule.kind === 'weekdays' && !schedule.days.includes(weekday)) {
+        throw new BadRequestException('Habit is not scheduled for today');
+      }
+      try {
+        // The unique owner/habit/date key selects the winner; no existing
+        // fields are changed here, including on a concurrent insertion.
+        log = await this.habitLogModel
+          .findOneAndUpdate(
+            filter,
+            { $setOnInsert: { configurationSnapshot: snapshot, ...progress } },
+            { upsert: true, returnDocument: 'after', runValidators: true },
+          )
+          .lean()
+          .exec();
+      } catch (error: unknown) {
+        if (
+          typeof error !== 'object' ||
+          error === null ||
+          !('code' in error) ||
+          error.code !== 11000
+        )
+          throw error;
+        // A competing insert won. Read its authority rather than retrying
+        // with our configuration or rewriting the original snapshot.
+        log = await this.habitLogModel.findOne(filter).lean();
+        if (!log) throw error;
+      }
+    }
+    if (!log) throw new NotFoundException('Habit log not found');
+    const configuration = log.configurationSnapshot
+      ? parseConfiguration(log.configurationSnapshot.configuration)
+      : resolved().configuration;
+    const progress = this.completionProgress(dto, configuration);
+    return this.habitLogModel
       .findOneAndUpdate(
-        {
-          userId: user._id,
-          habitId: new Types.ObjectId(habitId),
-          date: today,
-        },
-        {
-          completed: true,
-        },
-        {
-          upsert: true,
-          returnDocument: 'after',
-        },
+        { ...filter, _id: log._id },
+        { $set: progress },
+        { returnDocument: 'after', runValidators: true },
       )
       .lean()
       .exec();
+  }
 
-    return habitLog;
+  private completionProgress(
+    dto: CompleteHabitDto,
+    configuration: HabitConfiguration,
+  ) {
+    if (
+      typeof dto !== 'object' ||
+      dto === null ||
+      Array.isArray(dto) ||
+      Object.keys(dto).some((key) => key !== 'amount')
+    )
+      throw new BadRequestException('Expected only an optional amount');
+    const { goal } = configuration;
+    if (goal.kind === 'checkbox') {
+      if (Object.prototype.hasOwnProperty.call(dto, 'amount')) {
+        throw new BadRequestException('Checkbox goals do not accept amount');
+      }
+      return { completed: true };
+    }
+    const amount = dto.amount;
+    if (
+      typeof amount !== 'number' ||
+      !Number.isFinite(amount) ||
+      amount < 0 ||
+      amount > 1e9
+    )
+      throw new BadRequestException(
+        'Quantity goals require a finite amount 0..1e9',
+      );
+    return { amount, completed: amount >= goal.target };
   }
 
   async getLogs(habitId: string, user: User, getLogsDto: GetLogsDto) {
@@ -429,6 +493,8 @@ export class HabitsService {
           slug: '$habit.slug',
           date: 1,
           completed: 1,
+          amount: 1,
+          configurationSnapshot: 1,
         },
       },
       { $sort: { date: -1 } },

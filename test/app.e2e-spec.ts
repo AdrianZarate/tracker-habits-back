@@ -167,18 +167,21 @@ describe('Isolated HTTP security and habit contracts', () => {
     }),
   };
   const logModel = {
+    findOne: jest.fn((filter: Row) => ({
+      lean: () =>
+        Promise.resolve(logs.find((row) => matches(row, filter)) ?? null),
+    })),
     find: jest.fn((filter: Row) =>
       executable(logs.filter((row) => matches(row, filter))),
     ),
     findOneAndUpdate: jest.fn((filter: Row, update: Row, options: Row) => {
-      void options;
       let row = logs.find((row) => matches(row, filter));
-      if (!row) {
-        row = { _id: id(30), ...filter };
+      if (!row && options.upsert) {
+        row = { _id: id(30), ...filter, ...(update.$setOnInsert as Row) };
         logs.push(row);
       }
-      Object.assign(row, update);
-      return executable(row);
+      if (row) Object.assign(row, update.$set);
+      return executable(row ?? null);
     }),
     deleteOne: jest.fn((filter: Row) => {
       const before = logs.length;
@@ -203,6 +206,10 @@ describe('Isolated HTTP security and habit contracts', () => {
               slug: habit.slug,
               date: row.date,
               completed: row.completed,
+              ...(row.amount !== undefined ? { amount: row.amount } : {}),
+              ...(row.configurationSnapshot !== undefined
+                ? { configurationSnapshot: row.configurationSnapshot }
+                : {}),
             };
           })
           .sort((a, b) => Number(scalar(b.date)) - Number(scalar(a.date))),
@@ -459,9 +466,9 @@ describe('Isolated HTTP security and habit contracts', () => {
         .expect(json(log(21, owner, owned, '2025-03-31')));
     }
     expect(logModel.findOneAndUpdate).toHaveBeenCalledWith(
-      { ...scope(), date: anchor('2025-03-31') },
-      { completed: true },
-      { upsert: true, returnDocument: 'after' },
+      { ...scope(), date: anchor('2025-03-31'), _id: id(21) },
+      { $set: { completed: true } },
+      { returnDocument: 'after', runValidators: true },
     );
     expect(logs).toHaveLength(5);
     await send('delete', path(owned, '/incomplete'))
@@ -476,15 +483,101 @@ describe('Isolated HTTP security and habit contracts', () => {
   });
 
   it('inserts UTC current-day completion for a different account', async () => {
+    const configurationSnapshot = {
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'checkbox' },
+      },
+    };
     await send('post', path(foreign, '/complete'), token(other))
       .expect(201)
-      .expect(json(log(30, other, foreign, '2025-04-01')));
+      .expect(
+        json({
+          ...log(30, other, foreign, '2025-04-01'),
+          configurationSnapshot,
+        }),
+      );
     expect(logModel.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: other, habitId: foreign, date: anchor('2025-04-01') },
-      { completed: true },
-      { upsert: true, returnDocument: 'after' },
+      { $setOnInsert: { completed: true, configurationSnapshot } },
+      { upsert: true, returnDocument: 'after', runValidators: true },
     );
   });
+
+  it('records measured totals, retains the original snapshot, and exposes optional log fields', async () => {
+    const snapshot = {
+      revisionId: id(40).toHexString(),
+      effectiveFrom: '2025-03-01',
+      configuration: {
+        schedule: { kind: 'weekly', timesPerWeek: 3 },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      },
+    };
+    associations[0].configurationRevisions = [snapshot];
+    await send('delete', path(owned, '/incomplete')).expect(200);
+    for (const [amount, completed] of [
+      [10, false],
+      [20, true],
+      [0, false],
+    ]) {
+      const response = await send('post', path(owned, '/complete'))
+        .send({ amount })
+        .expect(201);
+      expect(response.body).toMatchObject({
+        amount,
+        completed,
+        configurationSnapshot: snapshot,
+      });
+    }
+    associations[0].configurationRevisions = [];
+    const before = json(logs);
+    await send('post', path(owned, '/complete')).expect(400);
+    expect(json(logs)).toEqual(before);
+    const response = await send('post', path(owned, '/complete'))
+      .send({ amount: 15 })
+      .expect(201);
+    expect(response.body).toMatchObject({
+      amount: 15,
+      completed: false,
+      configurationSnapshot: snapshot,
+    });
+    const history = await send('get', path(owned, '/logs')).expect(200);
+    expect(history.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          amount: 15,
+          configurationSnapshot: snapshot,
+        }),
+      ]),
+    );
+    const all = await send('get', '/habits/logs').expect(200);
+    expect(all.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          amount: 15,
+          configurationSnapshot: snapshot,
+        }),
+      ]),
+    );
+  });
+
+  it.each([
+    { amount: null },
+    { amount: '1' },
+    { amount: -1 },
+    { amount: 1e9 + 1 },
+    { amount: 0 },
+    { completed: true },
+    { configurationSnapshot: {} },
+  ])(
+    'rejects malformed completion or checkbox amounts %j without changing records',
+    async (body) => {
+      const before = json(logs);
+      await send('post', path(owned, '/complete')).send(body).expect(400);
+      expect(json(logs)).toEqual(before);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     { title: 'ab' },

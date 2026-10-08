@@ -9,6 +9,7 @@ import { model, Types } from 'mongoose';
 import { User, UserSchema } from '../auth/entities/user.entity';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 import { CreateHabitDto } from './dto/create-habit.dto';
+import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { HabitsController } from './habits.controller';
 import { HabitsService } from './habits.service';
@@ -46,6 +47,7 @@ const habitId = new Types.ObjectId().toHexString();
 describe('Personal definition controller plumbing', () => {
   const service = {
     create: jest.fn(),
+    complete: jest.fn(),
     update: jest.fn(),
     updateDefinition: jest.fn(),
   };
@@ -149,6 +151,37 @@ describe('Personal definition controller plumbing', () => {
       ),
     ).rejects.toThrow();
     expect(service.updateDefinition).not.toHaveBeenCalled();
+  });
+
+  it('uses the completion DTO and forwards only validated daily progress', async () => {
+    expect(
+      Reflect.getMetadata(
+        'design:paramtypes',
+        HabitsController.prototype,
+        'complete',
+      ),
+    ).toEqual([String, CompleteHabitDto, User]);
+    const dto = (await pipe.transform(
+      { amount: 0 },
+      { type: 'body', metatype: CompleteHabitDto },
+    )) as CompleteHabitDto;
+    await controller.complete(habitId, dto, user);
+    expect(service.complete).toHaveBeenCalledWith(habitId, user, { amount: 0 });
+  });
+
+  it('forwards bodyless completion and rejects client-supplied completion authority', async () => {
+    const dto = (await pipe.transform(undefined, {
+      type: 'body',
+      metatype: CompleteHabitDto,
+    })) as CompleteHabitDto;
+    await controller.complete(habitId, dto, user);
+    expect(service.complete).toHaveBeenCalledWith(habitId, user, undefined);
+    await expect(
+      pipe.transform(
+        { completed: true },
+        { type: 'body', metatype: CompleteHabitDto },
+      ),
+    ).rejects.toThrow();
   });
 
   it('keeps the original empty PATCH as deactivation', async () => {

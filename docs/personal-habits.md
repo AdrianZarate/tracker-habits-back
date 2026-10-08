@@ -79,9 +79,8 @@ invalid; omitting the bundle preserves configuration and appends no revision.
 
 Quantity targets apply **per recorded day/occurrence**. For the example above,
 a completed day requires 20 pages and the weekly quota requires three such
-days; recording 60 pages on one day does not fulfill three days. T3 will add
-measured recording and goal-aware evaluation; current completion booleans are
-not changed by T2.
+days; recording 60 pages on one day does not fulfill three days. Current-day
+recording evaluates completion against that day's original goal (see below).
 
 Unknown/irrelevant fields, null, numeric strings, duplicate weekdays, fractional
 weekly quotas and incomplete bundles are rejected. Configuration cannot change
@@ -132,17 +131,48 @@ response shape: clients derive daily checkbox. The same fallback applies to
 **all dates before the first revision**, without inventing an association birth
 date or migrating existing rows. Inactive owned definitions remain editable.
 
+## Record today's progress
+
+Use `POST /habits/:habitId/complete` on an **active, owned** habit:
+
+| Goal | Body | Result |
+| --- | --- | --- |
+| Checkbox | Empty body or `{}` | `completed: true`; numeric amounts are rejected. |
+| Quantity | `{"amount":15}` | Replaces today's total; `completed` is true when amount reaches the original target. |
+
+Amounts must be finite numbers from 0 through 1e9, including fractions. Zero
+records incomplete progress; totals are **not increments**. A missing quantity
+amount returns 400 without changing an existing record. Null, strings, negatives,
+unknown fields and client-supplied `completed` or `configurationSnapshot` are
+rejected. Missing, foreign and inactive associations return 404.
+
+The account-local day is captured once before database operations. New records
+store a full `configurationSnapshot` containing `configuration` and any resolved
+`revisionId`/`effectiveFrom`. It is set only on insertion, never overwritten on
+repeat writes; even concurrent insertion uses the first stored snapshot's goal.
+Selected-weekday schedules reject new records on nonselected days; daily and
+weekly-quota schedules allow any day. Existing records can still be updated on
+nonselected days and are never deleted by schedule enforcement.
+
+Legacy records keep their original date labels, IDs and unique owner/habit/date
+key. Snapshotless records resolve the configuration applicable on their date;
+repeat writes do not backfill snapshots. Missing legacy quantities are never
+inferred from booleans: only an explicitly submitted amount adds measured data.
+Habit-log reads and owner-wide summaries expose `amount` and
+`configurationSnapshot` only when present, retaining legacy response shapes.
+`DELETE /habits/:habitId/incomplete` still deletes today's record; it does not
+redesign historical undo.
+
 ## Scope and verification
 
-T2 persists configuration history and exports pure date-based resolution for
-T3. It does **not yet** implement measured progress, historical log snapshots,
-goal-aware completion/correction, notes, schedule enforcement, pause/archive or
-frontend controls. Full original-history acceptance still requires T3; existing
-stored completion booleans and log mutations remain unchanged.
+Current-day measured recording and original snapshots are implemented. Historical
+correction, notes, weekly summaries, pause/archive and frontend controls remain
+later work; there is no bulk migration or automatic recalculation of history.
 
-Deterministic helper, schema, service, DTO and controller tests cover strict
-bundles, dates/timezones/DST, original-goal selection, pending changes, legacy
-fallback, immutability, insert-only initialization and owner-scoped atomic
-append contracts. Aggregate/update tests inspect Mongo contracts, not execution
-against live MongoDB. Existing synthetic HTTP regressions run without a real
-database or private environment configuration.
+Deterministic helper, schema, service, DTO, controller and synthetic HTTP tests
+cover strict validation, dates/timezones/DST, original goals, pending changes,
+replacement totals, thresholds, schedules, legacy compatibility, immutable
+snapshots and owner/activity checks. Concurrent-winner and duplicate-key tests
+inspect Mongo update contracts using doubles, not live MongoDB execution. HTTP
+regressions use synthetic fixtures without a database or private environment
+configuration.

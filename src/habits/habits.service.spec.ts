@@ -60,6 +60,7 @@ describe('Owner-scoped habit calendar operations', () => {
   };
   const logs = {
     find: jest.fn(),
+    findOne: jest.fn(),
     findOneAndUpdate: jest.fn(),
     deleteOne: jest.fn(),
     aggregate: jest.fn(),
@@ -73,6 +74,7 @@ describe('Owner-scoped habit calendar operations', () => {
       query({ _id: habitId, title: 'Read', slug: 'read' }),
     );
     logs.find.mockReturnValue(executableQuery([]));
+    logs.findOne.mockReturnValue(query(null));
     logs.findOneAndUpdate.mockReturnValue(executableQuery({ completed: true }));
     logs.deleteOne.mockResolvedValue({ acknowledged: true, deletedCount: 1 });
     const module = await Test.createTestingModule({
@@ -270,6 +272,8 @@ describe('Owner-scoped habit calendar operations', () => {
             slug: '$habit.slug',
             date: 1,
             completed: 1,
+            amount: 1,
+            configurationSnapshot: 1,
           },
         },
       ]),
@@ -674,6 +678,323 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
+  describe('current-day measured records', () => {
+    const configuration: HabitConfiguration = {
+      schedule: { kind: 'daily' },
+      goal: { kind: 'quantity', target: 20, unit: 'pages' },
+    };
+    const snapshot: ConfigurationRevision = {
+      revisionId: '000000000000000000000010',
+      effectiveFrom: '2020-01-01',
+      configuration,
+    };
+    let stored: Record<string, unknown> | null;
+    const write = (body: unknown = {}) =>
+      service.complete(id, account(), body as { amount?: number });
+    const configure = (revision = snapshot) =>
+      association.findOne.mockReturnValue(
+        query({ active: true, habitId, configurationRevisions: [revision] }),
+      );
+
+    beforeEach(() => {
+      stored = null;
+      configure();
+      logs.findOne.mockImplementation(() => query(stored));
+      logs.findOneAndUpdate.mockImplementation(
+        (filter: object, update: { $setOnInsert?: object; $set?: object }) => {
+          if (!stored)
+            stored = { _id: otherId, ...filter, ...update.$setOnInsert };
+          Object.assign(stored, update.$set);
+          return executableQuery({ ...stored });
+        },
+      );
+    });
+
+    it('replaces daily totals including zero and preserves the first full snapshot', async () => {
+      for (const [amount, completed] of [
+        [10, false],
+        [20, true],
+        [25, true],
+        [0, false],
+      ]) {
+        expect(await write({ amount })).toMatchObject({
+          amount,
+          completed,
+          configurationSnapshot: snapshot,
+        });
+      }
+      expect(stored!.amount).toBe(0);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
+        { userId: ownerId, habitId, date: anchor('2025-04-01') },
+        {
+          $setOnInsert: {
+            configurationSnapshot: snapshot,
+            amount: 10,
+            completed: false,
+          },
+        },
+        { upsert: true, returnDocument: 'after', runValidators: true },
+      );
+    });
+
+    it.each([false, true])(
+      'rejects bodyless quantity without changing records (existing=%s)',
+      async (existing) => {
+        if (existing)
+          stored = {
+            _id: otherId,
+            amount: 10,
+            completed: false,
+            configurationSnapshot: snapshot,
+          };
+        await expect(write()).rejects.toBeInstanceOf(BadRequestException);
+        expect(stored?.amount).toBe(existing ? 10 : undefined);
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([null, '2', NaN, Infinity, -Infinity, -1, 1e9 + 1])(
+      'rejects invalid amount %s before writes',
+      async (amount) => {
+        await expect(write({ amount })).rejects.toBeInstanceOf(
+          BadRequestException,
+        );
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      null,
+      [],
+      '20',
+      { completed: true },
+      { configurationSnapshot: snapshot },
+      { amount: 20, extra: true },
+    ])('rejects client authority/unknown fields %j', async (body) => {
+      await expect(write(body)).rejects.toBeInstanceOf(BadRequestException);
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('uses the stored original goal even when the association differs', async () => {
+      stored = {
+        _id: otherId,
+        configurationSnapshot: snapshot,
+        amount: 10,
+        completed: false,
+      };
+      association.findOne.mockReturnValue(query({ active: true, habitId }));
+      expect(await write({ amount: 15 })).toMatchObject({
+        amount: 15,
+        completed: false,
+        configurationSnapshot: snapshot,
+      });
+      expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: ownerId, habitId, _id: otherId }),
+        { $set: { amount: 15, completed: false } },
+        { returnDocument: 'after', runValidators: true },
+      );
+    });
+
+    it('uses an existing checkbox snapshot instead of the current quantity goal', async () => {
+      const original = {
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      };
+      stored = {
+        _id: otherId,
+        configurationSnapshot: original,
+        completed: true,
+      };
+      await expect(write({ amount: 0 })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(await write()).toMatchObject({
+        configurationSnapshot: original,
+        completed: true,
+      });
+      expect(stored).not.toHaveProperty('amount');
+    });
+
+    it('does not backfill legacy booleans with snapshots or amounts', async () => {
+      stored = { _id: otherId, completed: true };
+      association.findOne.mockReturnValue(query({ active: true, habitId }));
+      expect(await write()).toEqual({ _id: otherId, completed: true });
+      expect(stored).not.toHaveProperty('amount');
+      expect(stored).not.toHaveProperty('configurationSnapshot');
+      await expect(write({ amount: 0 })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('only adds an explicit amount to snapshotless quantity records', async () => {
+      stored = { _id: otherId, completed: true };
+      await expect(write()).rejects.toBeInstanceOf(BadRequestException);
+      expect(stored).not.toHaveProperty('amount');
+      expect(await write({ amount: 0 })).toEqual({
+        _id: otherId,
+        amount: 0,
+        completed: false,
+      });
+      expect(stored).not.toHaveProperty('configurationSnapshot');
+    });
+
+    it('blocks only new nonselected weekday records', async () => {
+      configure({
+        ...snapshot,
+        configuration: {
+          ...configuration,
+          schedule: { kind: 'weekdays', days: [1] },
+        },
+      });
+      await expect(write({ amount: 20 })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      stored = { _id: otherId, completed: false };
+      expect(await write({ amount: 20 })).toMatchObject({
+        amount: 20,
+        completed: true,
+      });
+      expect(logs.deleteOne).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { kind: 'weekdays' as const, days: [7] },
+      { kind: 'weekly' as const, timesPerWeek: 3 },
+    ])(
+      'allows a selected local Sunday or any weekly day %j',
+      async (schedule) => {
+        jest.setSystemTime(new Date('2025-04-07T00:30:00Z'));
+        configure({
+          ...snapshot,
+          configuration: { ...configuration, schedule },
+        });
+        const result = await service.complete(
+          id,
+          account('America/Los_Angeles'),
+          { amount: 0.5 },
+        );
+        expect(result).toMatchObject({
+          date: anchor('2025-04-06'),
+          amount: 0.5,
+          completed: false,
+        });
+      },
+    );
+
+    it('captures today before awaited reads, ignoring a next-day pending goal', async () => {
+      association.findOne.mockImplementation(() => {
+        jest.setSystemTime(new Date('2025-04-02T00:30:00Z'));
+        return query({
+          active: true,
+          habitId,
+          configurationRevisions: [
+            snapshot,
+            {
+              ...snapshot,
+              effectiveFrom: '2025-04-02',
+              configuration: {
+                ...configuration,
+                goal: { kind: 'quantity', target: 5, unit: 'pages' },
+              },
+            },
+          ],
+        });
+      });
+      expect(await write({ amount: 10 })).toMatchObject({
+        date: anchor('2025-04-01'),
+        completed: false,
+        configurationSnapshot: snapshot,
+      });
+    });
+
+    it.each([false, true])(
+      'evaluates the concurrent insert winner, including duplicate-key retry=%s',
+      async (duplicate) => {
+        const winner = {
+          ...snapshot,
+          configuration: {
+            ...configuration,
+            goal: { kind: 'quantity', target: 50, unit: 'pages' },
+          },
+        };
+        logs.findOneAndUpdate.mockImplementationOnce(() => {
+          stored = {
+            _id: otherId,
+            amount: 1,
+            completed: false,
+            configurationSnapshot: winner,
+          };
+          const error = Object.assign(new Error('duplicate key'), {
+            code: 11000,
+          });
+          return duplicate
+            ? { lean: () => ({ exec: () => Promise.reject(error) }) }
+            : executableQuery({ ...stored });
+        });
+        expect(await write({ amount: 20 })).toMatchObject({
+          amount: 20,
+          completed: false,
+          configurationSnapshot: winner,
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(2);
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ _id: otherId }),
+          { $set: { amount: 20, completed: false } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      },
+    );
+
+    it('does not change a concurrent checkbox winner when amount is invalid for its goal', async () => {
+      const original = {
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      };
+      logs.findOneAndUpdate.mockImplementationOnce(() => {
+        stored = {
+          _id: otherId,
+          completed: true,
+          configurationSnapshot: original,
+        };
+        return executableQuery({ ...stored });
+      });
+      await expect(write({ amount: 10 })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      expect(stored).toEqual({
+        _id: otherId,
+        completed: true,
+        configurationSnapshot: original,
+      });
+    });
+
+    it('propagates duplicate-key failure if no winner can be read', async () => {
+      const error = Object.assign(new Error('duplicate key'), { code: 11000 });
+      logs.findOneAndUpdate.mockReturnValueOnce({
+        lean: () => ({ exec: () => Promise.reject(error) }),
+      });
+      await expect(write({ amount: 1 })).rejects.toBe(error);
+      expect(logs.findOne).toHaveBeenCalledTimes(2);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates non-duplicate database failures without retrying', async () => {
+      const error = new Error('synthetic database failure');
+      logs.findOneAndUpdate.mockReturnValueOnce({
+        lean: () => ({ exec: () => Promise.reject(error) }),
+      });
+      await expect(write({ amount: 1 })).rejects.toBe(error);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('returns 404 for an orphaned association', async () => {
     habit.findOne.mockReturnValue(query(null));
     await expect(service.findOneByUser(id, account())).rejects.toBeInstanceOf(
@@ -691,11 +1012,25 @@ describe('Owner-scoped habit calendar operations', () => {
     const user = account(zone);
     expect(await service.complete(id, user)).toEqual({ completed: true });
     expect(await service.complete(id, user)).toEqual({ completed: true });
-    expect(logs.findOneAndUpdate).toHaveBeenNthCalledWith(
-      2,
+    expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: ownerId, habitId, date: anchor(day) },
-      { completed: true },
-      { upsert: true, returnDocument: 'after' },
+      {
+        $setOnInsert: {
+          completed: true,
+          configurationSnapshot: {
+            configuration: {
+              schedule: { kind: 'daily' },
+              goal: { kind: 'checkbox' },
+            },
+          },
+        },
+      },
+      { upsert: true, returnDocument: 'after', runValidators: true },
+    );
+    expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId, date: anchor(day), _id: undefined },
+      { $set: { completed: true } },
+      { returnDocument: 'after', runValidators: true },
     );
     expect(association.findOne).toHaveBeenCalledWith({
       userId: ownerId,

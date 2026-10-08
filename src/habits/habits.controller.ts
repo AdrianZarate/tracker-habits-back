@@ -11,6 +11,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { HabitsService } from './habits.service';
 import { CreateHabitDto } from './dto/create-habit.dto';
+import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
@@ -75,12 +76,13 @@ export class HabitsController {
   }
 
   @Post(':habitId/complete')
-  @ApiOperation({ summary: 'Marcar hábito como completado' })
+  @ApiOperation({ summary: 'Registrar progreso de hoy (total de reemplazo)' })
   complete(
     @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Body() completeHabitDto: CompleteHabitDto,
     @GetUser() user: User,
   ) {
-    return this.habitsService.complete(habitId, user);
+    return this.habitsService.complete(habitId, user, completeHabitDto);
   }
 
   @Get(':habitId/logs')
