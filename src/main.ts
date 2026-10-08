@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -46,7 +47,12 @@ async function bootstrap() {
   const documentFactory = () => SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, documentFactory);
 
-  await app.listen(process.env.PORT ?? 3000);
-  logger.log('App running on port', process.env.PORT ?? 3000);
+  const port = app.get(ConfigService).getOrThrow<number>('PORT');
+  await app.listen(port);
+  logger.log(`App running on port ${port}`);
 }
-bootstrap();
+bootstrap().catch(() => {
+  // Do not log startup configuration values, which may contain credentials.
+  new Logger('Bootstrap').error('Application startup failed');
+  process.exitCode = 1;
+});

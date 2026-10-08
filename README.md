@@ -4,6 +4,8 @@
 
 # 📊 Habit Tracker API
 
+> **Guía vigente:** [Configuración y autenticación Google](docs/configuration.md) es la referencia actual. Los ejemplos de registro/login con contraseña de este README son antiguos; la API usa exclusivamente Google.
+
 API RESTful para el seguimiento y gestión de hábitos personales, desarrollada con NestJS, MongoDB y JWT para autenticación.
 
 ## ✨ Características

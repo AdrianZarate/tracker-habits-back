@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { AuthModule } from './auth/auth.module';
 import { envConfig } from './config/env.config';
@@ -15,8 +15,13 @@ import { CommonModule } from './common/common.module';
       validationSchema: joiValidationSchema,
     }),
 
-    MongooseModule.forRoot(process.env.MONGODB!, {
-      dbName: 'habit-tracker',
+    MongooseModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        uri: config.getOrThrow<string>('MONGODB'),
+        dbName: 'habit-tracker',
+      }),
     }),
 
     AuthModule,
