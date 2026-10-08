@@ -109,7 +109,7 @@ describe('Google account timezone', () => {
       expect(model.findOneAndUpdate).toHaveBeenCalledWith(
         { _id: id, timeZone: { $exists: false } },
         { $set: { timeZone: timeZone ?? 'UTC' } },
-        { new: true },
+        { returnDocument: 'after' },
       );
     },
   );

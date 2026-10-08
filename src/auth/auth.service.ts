@@ -72,7 +72,7 @@ export class AuthService {
         .findOneAndUpdate(
           { _id: user._id, timeZone: { $exists: false } },
           { $set: { timeZone: timeZone ?? 'UTC' } },
-          { new: true },
+          { returnDocument: 'after' },
         )
         .lean()
         .exec();
