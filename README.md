@@ -1,255 +1,121 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Habit Tracker API
 
-# 📊 Habit Tracker API
+API de hábitos personales con NestJS, MongoDB y autenticación Google.
+Permite crear/reactivar hábitos, registrar el día completado y consultar historial
+según el calendario de cada cuenta. Este README guía el desarrollo local;
+**no declara el proyecto listo para producción ni cubre despliegue público**.
 
-> **Guía vigente:** [Configuración y autenticación Google](docs/configuration.md) es la referencia actual. Los ejemplos de registro/login con contraseña de este README son antiguos; la API usa exclusivamente Google.
+## Inicio local
 
-API RESTful para el seguimiento y gestión de hábitos personales, desarrollada con NestJS, MongoDB y JWT para autenticación.
+Necesitas Node.js, Yarn Classic **1.x**, MongoDB y, si usas el servicio incluido,
+Docker con Compose. Ejecuta los comandos de Yarn desde el directorio `api/`.
 
-## ✨ Características
+1. Instala respetando el lockfile y sin scripts de instalación:
 
-- 🔐 Autenticación JWT con registro y login de usuarios
-- ✅ Crear y gestionar hábitos personalizados
-- 📝 Marcar hábitos como completados/incompletos
-- 📊 Visualizar registros (logs) de hábitos por fecha
-- 🔒 Endpoints protegidos con guards de autenticación
-- 📖 Documentación interactiva con Swagger
-- 🐳 Configuración Docker para MongoDB
-- 🌐 CORS configurado para múltiples orígenes
-
-## 📋 Requisitos Previos
-
-- [Node.js](https://nodejs.org/) (v18 o superior)
-- [Yarn](https://yarnpkg.com/) o npm
-- [Docker](https://www.docker.com/) y Docker Compose (para MongoDB)
-- [MongoDB](https://www.mongodb.com/) (si no usas Docker)
-
-## 🚀 Instalación
-
-1. **Clonar el repositorio**
-
-   ```bash
-   git clone <url-del-repositorio>
-   cd habit-tracker
+   ```sh
+   yarn install --frozen-lockfile --ignore-scripts
    ```
 
-2. **Instalar dependencias**
+2. Proporciona las variables de la tabla siguiente mediante el entorno del
+   proceso o un `.env` privado en `api/`. No publiques credenciales ni archivos
+   de entorno; conserva los valores explícitos que ya tengas configurados.
+3. Si necesitas MongoDB local, inicia **solo** el servicio `db`:
 
-   ```bash
-   yarn install
-   # o
-   npm install
+   ```sh
+   # Desde la raíz del workspace (contiene api/ y frontend/):
+   docker compose -f api/docker-compose.yaml up -d db
+   # Alternativa desde api/:
+   docker compose up -d db
    ```
 
-3. **Configurar variables de entorno**
+4. Con la configuración válida y MongoDB disponible, inicia la API:
 
-   Crear un archivo `.env` en la raíz del proyecto con las siguientes variables:
-
-   ```env
-   # Entorno
-   NODE_ENV=development
-
-   # Puerto del servidor
-   PORT=3000
-
-   # MongoDB
-   MONGODB=mongodb://localhost:27017/habit-tracker
-
-   # JWT Secret
-   JWT_SECRET=tu_clave_secreta_super_segura_aqui
+   ```sh
+   yarn start:dev
    ```
 
-4. **Iniciar MongoDB con Docker**
-   ```bash
-   docker-compose up -d
+Por defecto escucha en `http://localhost:3000`; Swagger está en `/api`.
+Si defines `PORT`, usa ese puerto tanto en las URLs como en el frontend.
+Configura `VITE_API_URL` con la URL base de esta API (por ejemplo,
+`http://localhost:3000`, sin `/api`). Para Google en el cliente y sus orígenes
+OAuth autorizados, sigue el [README del frontend](../frontend/README.md).
+
+## Configuración del servidor
+
+| Variable | Contrato |
+| --- | --- |
+| `MONGODB` | Obligatoria: URI no vacía. La API selecciona la base `habit-tracker`. |
+| `GOOGLE_CLIENT_ID` | Obligatoria: ID de cliente Google cuya audiencia se valida. |
+| `JWT_SECRET` | Obligatoria: secreto privado fuerte, no vacío ni solo espacios; sin valor por defecto. |
+| `PORT` | Entero entre 1 y 65535; **3000 solo si se omite**. El valor explícito se conserva; valores inválidos impiden arrancar. |
+| `NODE_ENV` | `development` si se omite. |
+
+Nest valida al arrancar; bootstrap, MongoDB y autenticación consumen las claves
+mayúsculas mediante `ConfigService`, sin alias antiguos ni secreto de respaldo.
+El entorno del proceso tiene prioridad sobre `.env`. Consulta los detalles en
+[Configuración y autenticación](docs/configuration.md).
+
+## Autenticación: solo Google
+
+1. Obtén en el cliente un **ID token de Google** para `GOOGLE_CLIENT_ID`.
+2. Envía `POST /auth/google` con este cuerpo:
+
+   ```json
+   { "idToken": "<ID token de Google>", "timeZone": "Europe/Madrid" }
    ```
 
-## 🏃‍♂️ Ejecución del Proyecto
+3. Usa el `token` devuelto (JWT de la API, duración **2 horas**) en
+   `Authorization: Bearer <token>`. No uses el ID token como JWT de la API.
+   En Swagger, autoriza con ese JWT mediante el esquema `JWT-auth`.
 
-### Modo Desarrollo
+`GET /auth/check-status` requiere Bearer JWT y devuelve estado público y token.
+No existen endpoints de registro/login con contraseña.
+`timeZone` es opcional: sin zona previa, omitirlo asigna UTC; un valor IANA
+inválido devuelve 400. La primera asignación se persiste, también en cuentas antiguas;
+posteriores accesos no la reemplazan. Mientras una cuenta antigua no tenga zona,
+las lecturas usan UTC sin escribirla. **El historial nunca se desplaza ni reescribe**.
 
-```bash
-yarn start:dev
-```
+## Hábitos y calendario
 
-El servidor se iniciará en `http://localhost:3000` (o el puerto configurado en `.env`)
+Todas las rutas de hábitos requieren JWT. La identidad autenticada determina
+las asociaciones y registros: no se acepta un usuario elegido por el cliente.
+Los parámetros `:habitId` deben ser IDs Mongo válidos; si no, devuelven 400.
 
-### Modo Producción
+| Ruta | Comportamiento |
+| --- | --- |
+| `POST /habits` | Crea/reutiliza el hábito global por título y activa la asociación de la cuenta. |
+| `GET /habits` | Lista las asociaciones activas de la cuenta. |
+| `GET /habits/:habitId` | Detalle propio `{ habitId, title, slug, active }`, incluso inactivo; ausente/ajeno devuelve 404. |
+| `PATCH /habits/:habitId` | Desactiva la asociación propia, incluso si ya está inactiva; ausente/ajena devuelve 404. No edita el título. |
+| `POST /habits/:habitId/complete` | Requiere asociación propia activa; registra hoy de forma idempotente. |
+| `DELETE /habits/:habitId/incomplete` | Borra solo el registro propio de hoy, sin exigir asociación activa; ajeno/ausente devuelve **200**, `deletedCount: 0` (no-op). |
+| `GET /habits/:habitId/logs` | Historial propio, incluso inactivo; ajeno/ausente devuelve `[]`, no 404. |
+| `GET /habits/logs` | Todos los registros propios, incluidos inactivos, del más reciente al más antiguo; sin filtro mensual. |
 
-```bash
-# Construir
+Completar/deshacer usa el día de la zona persistida de la cuenta, no la del
+servidor o dispositivo. En `/habits/:habitId/logs`, `startDate` y `endDate` son
+fechas gregorianas estrictas `YYYY-MM-DD` (años 0001–9999), inclusivas.
+Cada límite omitido usa el inicio/fin del **mes actual de la cuenta**.
+Fechas imposibles, vacías, timestamps y rangos invertidos devuelven 400.
+Los registros históricos conservan sus anclas UTC originales como etiquetas de
+calendario. Véanse [Calendario](docs/calendar-contract.md) y
+[Contrato de hábitos](docs/habits-contract.md) para respuestas y casos límite.
+
+## Comprobaciones y límites
+
+Desde `api/`, sin usar `yarn lint` (incluye `--fix`):
+
+```sh
+yarn test --runInBand
+yarn test:e2e --runInBand
+yarn eslint "{src,apps,libs,test}/**/*.ts"
 yarn build
-
-# Ejecutar
-yarn start:prod
 ```
 
-### Modo Debug
-
-```bash
-yarn start:debug
-```
-
-## 🐳 Docker
-
-### Iniciar MongoDB
-
-```bash
-docker-compose up -d
-```
-
-### Detener MongoDB
-
-```bash
-docker-compose down
-```
-
-### Ver logs
-
-```bash
-docker-compose logs -f
-```
-
-## 📖 Documentación de la API (Swagger)
-
-Una vez iniciado el servidor, accede a la documentación interactiva en:
-
-```
-http://localhost:3000/api
-```
-
-### Autenticación en Swagger
-
-1. Usa el endpoint `/auth/login` o `/auth/register` para obtener un token JWT
-2. Copia el token de la respuesta
-3. Haz clic en el botón **"Authorize" 🔓** en la parte superior derecha
-4. Pega el token (sin incluir la palabra "Bearer")
-5. Clic en "Authorize" y luego "Close"
-6. Ahora puedes probar todos los endpoints protegidos
-
-## 📁 Estructura del Proyecto
-
-```
-habit-tracker/
-├── src/
-│   ├── auth/                    # Módulo de autenticación
-│   │   ├── decorators/          # Decoradores personalizados (@Auth, @GetUser)
-│   │   ├── dto/                 # DTOs para login y registro
-│   │   ├── entities/            # Entidad de usuario
-│   │   ├── guards/              # Guards de autorización por roles
-│   │   ├── interface/           # Interfaces
-│   │   ├── strategies/          # Estrategia JWT de Passport
-│   │   └── auth.service.ts      # Lógica de autenticación
-│   ├── common/                  # Recursos compartidos
-│   │   └── pipes/               # Pipes personalizados (ParseMongoId)
-│   ├── config/                  # Configuración de variables de entorno
-│   ├── habits/                  # Módulo de hábitos
-│   │   ├── dto/                 # DTOs para hábitos y logs
-│   │   ├── entities/            # Entidades (Habit, HabitUser, HabitLog)
-│   │   └── habits.service.ts    # Lógica de negocio de hábitos
-│   ├── app.module.ts            # Módulo principal
-│   └── main.ts                  # Punto de entrada de la aplicación
-├── test/                        # Tests e2e
-├── mongo/                       # Datos persistentes de MongoDB (Docker)
-├── docker-compose.yaml          # Configuración de Docker
-└── package.json
-```
-
-## 🛠️ Tecnologías Utilizadas
-
-- **Framework**: [NestJS](https://nestjs.com/) v11
-- **Base de datos**: [MongoDB](https://www.mongodb.com/) con [Mongoose](https://mongoosejs.com/)
-- **Autenticación**: JWT con [Passport](http://www.passportjs.org/)
-- **Documentación**: [Swagger](https://swagger.io/) / OpenAPI
-- **Validación**: [class-validator](https://github.com/typestack/class-validator) y [class-transformer](https://github.com/typestack/class-transformer)
-- **Encriptación**: [bcrypt](https://www.npmjs.com/package/bcrypt)
-- **Testing**: [Jest](https://jestjs.io/)
-
-## 🔑 Autenticación y Autorización
-
-La API utiliza JSON Web Tokens (JWT) para autenticación. Todos los endpoints de hábitos requieren autenticación.
-
-### Flujo de autenticación:
-
-1. **Registro**: `POST /auth/register`
-
-   ```json
-   {
-     "email": "usuario@example.com",
-     "password": "password123",
-     "fullName": "Nombre Completo"
-   }
-   ```
-
-2. **Login**: `POST /auth/login`
-
-   ```json
-   {
-     "email": "usuario@example.com",
-     "password": "password123"
-   }
-   ```
-
-   Respuesta:
-
-   ```json
-   {
-     "user": { ... },
-     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-   }
-   ```
-
-3. **Uso del token**: Incluye el token en el header `Authorization`:
-   ```
-   Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-   ```
-
-## 📌 Endpoints Principales
-
-### Autenticación
-
-- `POST /auth/register` - Registrar nuevo usuario
-- `POST /auth/login` - Iniciar sesión
-- `GET /auth/check-status` - Verificar estado de autenticación (requiere token)
-
-### Hábitos (todos requieren autenticación)
-
-- `POST /habits` - Crear nuevo hábito
-- `GET /habits` - Obtener todos los hábitos del usuario
-- `PATCH /habits/:habitId` - Actualizar un hábito
-- `POST /habits/:habitId/complete` - Marcar hábito como completado
-- `DELETE /habits/:habitId/incomplete` - Eliminar registro de completado
-- `GET /habits/:habitId/logs` - Obtener logs de un hábito específico
-- `GET /habits/logs` - Obtener todos los logs del usuario
-
-## 🌐 CORS
-
-El servidor está configurado para aceptar peticiones desde:
-
-- `https://tracker-habits.alexadrian.dev`
-- `https://dynamic-nasturtium-c7a358.netlify.app`
-- `http://localhost:5173`
-
-Para modificar los orígenes permitidos, edita el array `origin` en [src/main.ts](src/main.ts).
-
-## 🤝 Contribución
-
-1. Fork el proyecto
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
-
-## 📄 Licencia
-
-Este proyecto es privado y está bajo licencia UNLICENSED.
-
-## 👨‍💻 Soporte
-
-Para preguntas o problemas, abre un issue en el repositorio.
-
----
-
-Desarrollado con ❤️ usando [NestJS](https://nestjs.com/)
+La referencia de cobertura es de 126 pruebas unitarias y 38 HTTP aisladas;
+esta limpieza documental no vuelve a ejecutarlas. Las unitarias usan dobles de
+base de datos/autenticación; las HTTP ejercitan guards, validación y servicios
+reales con modelos simulados. No prueban OAuth Google en vivo ni persistencia,
+agregaciones o índices en MongoDB real. Consulta
+[Verificación HTTP y límites](docs/http-verification.md). No se afirma validación
+de servicios externos ni preparación para producción.
