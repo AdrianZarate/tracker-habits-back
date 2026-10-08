@@ -21,7 +21,7 @@ Edit an owned habit with `PATCH /habits/:habitId/definition`:
 ```
 
 This changes the personal title, clears category and preserves the omitted icon.
-The definition response uses the detail shape: `habitId`, `title`, `slug`, `active`,
+The definition response uses the detail shape: `habitId`, `title`, `slug`, `status`, `active`,
 and any stored optional metadata. Versioned habits also include `configuration`
 and, when a future change exists, `pendingConfiguration` (see below). An empty
 definition patch reads the owned habit without changing it.
@@ -39,7 +39,7 @@ definition patch reads the owned habit without changing it.
 | Invalid values | Null, non-string values and unsupported payload fields are rejected. |
 | Ownership | Edit filters by authenticated user ID and habit ID. Missing and foreign associations return the same 404. |
 | Inactive associations | Remain editable without reactivation. |
-| Legacy PATCH | Empty `PATCH /habits/:habitId` still deactivates; it is not a definition editor. |
+| Legacy PATCH | Empty `PATCH /habits/:habitId` pauses unless already archived; it is not a definition editor. |
 
 Owner list and detail responses show the personal title, falling back to the
 catalog title for legacy associations without an override. Optional metadata is
@@ -91,7 +91,7 @@ ownership, catalog identity or lifecycle state.
 A newly inserted association starts with the submitted configuration effective
 **today** in the account timezone (UTC when omitted). With no bundle, it starts
 with daily checkbox. Repeated `POST /habits` updates supplied metadata and
-reactivates, but **never changes an existing association's revisions**, including
+reactivates active/paused habits, but **never changes an existing association's revisions**, including
 legacy associations without revisions. Use the definition PATCH to change them.
 
 Each definition configuration edit atomically appends a complete revision with
@@ -264,10 +264,38 @@ instants. Week arithmetic uses calendar fields, never elapsed 24-hour durations
 across DST. This endpoint performs no database writes and leaves both existing
 log-read response contracts unchanged.
 
+## Pause, archive and restore
+
+Set an owned association's state with `PATCH /habits/:habitId/lifecycle`:
+
+```json
+{ "status": "archived" }
+```
+
+`status` is required and accepts only `active`, `paused` or `archived`. Extra
+fields are rejected. Every transition, including repeated requests for the same
+state, is idempotent. Missing and foreign associations return the same 404.
+Use this endpoint with `active` to restore an archive or resume a pause.
+
+| Operation | Lifecycle contract |
+| --- | --- |
+| List | `GET /habits` defaults to active. `?status=paused`, `archived` or `all` selects other owned associations; `active` is also explicit. |
+| Response | List/detail and association-write responses add `status` and `active` (true only for active status), alongside existing personal metadata and current/pending configuration. |
+| Legacy rows | Missing status derives from the stored boolean: true means active, false means paused. Reads never backfill or change storage. |
+| Legacy empty PATCH | Pauses active/paused rows; archived rows remain archived. |
+| Repeat POST | May resume paused associations, preserving existing configuration. Archived associations return 409 with explicit-restore guidance, including a concurrent archive/unique-key collision. |
+| New progress | Today's bodyless/measured completion and missing historical-record insertion require active status. A paused/archived row cannot bypass this with a stale `active: true`. |
+| Inactive access | Owned detail, definition editing, history, week reads and existing-record correction remain allowed without reactivation. |
+
+Lifecycle writes synchronize the legacy `active` flag but never change catalog
+or personal definitions, goal revisions, log records or original snapshots.
+History is retained through pause, archive and restoration. Current-day undo
+retains its existing deletion contract; it is not a lifecycle operation.
+
 ## Scope and verification
 
-Current-day measured recording, original snapshots, notes, historical correction
-and weekly reads are implemented. Pause/archive and frontend controls remain
+Current-day measured recording, original snapshots, notes, historical correction,
+weekly reads and association lifecycle are implemented. Frontend controls remain
 later work; there is no bulk migration or automatic recalculation of history.
 
 Deterministic helper, schema, service, DTO, controller and synthetic HTTP tests
@@ -275,7 +303,8 @@ cover strict validation, dates/timezones/DST, original goals, pending changes,
 replacement totals, thresholds, schedules, legacy compatibility, immutable
 snapshots, notes-only preservation, historical corrections, legacy quantity gaps,
 owner/activity checks, undo/reinsert conflicts, ISO weeks/year overflow, selected-date
-quotas and authoritative stored completed-day counts. Concurrent-winner and duplicate-key tests
+quotas, lifecycle transitions, legacy status filters, archive-safe reactivation
+and authoritative stored completed-day counts. Concurrent-winner and duplicate-key tests
 inspect Mongo update contracts using doubles, not live MongoDB execution. HTTP
 regressions use synthetic fixtures without a database or private environment
 configuration.

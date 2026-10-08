@@ -26,6 +26,9 @@ const ConfigurationRevisionSchema = new MongooseSchema(
   { _id: false, strict: 'throw' },
 );
 
+export const HABIT_STATUSES = ['active', 'paused', 'archived'] as const;
+export type HabitStatus = (typeof HABIT_STATUSES)[number];
+
 @Schema()
 export class HabitUser extends Document {
   @Prop({
@@ -58,6 +61,10 @@ export class HabitUser extends Document {
   // No default/backfill: legacy rows resolve daily checkbox for every date.
   @Prop({ type: [ConfigurationRevisionSchema], default: undefined })
   configurationRevisions?: ConfigurationRevision[];
+
+  // Optional with no default: never mask a legacy active=false association.
+  @Prop({ type: String, enum: HABIT_STATUSES })
+  status?: HabitStatus;
 
   @Prop({ default: true })
   active: boolean;

@@ -14,6 +14,8 @@ import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { GetHabitsDto } from './dto/get-habits.dto';
+import { UpdateHabitLifecycleDto } from './dto/update-habit-lifecycle.dto';
 import { GetHabitWeekDto } from './dto/get-habit-week.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
@@ -35,8 +37,8 @@ export class HabitsController {
 
   @Get()
   @ApiOperation({ summary: 'Obtener todos los hábitos del usuario' })
-  findAll(@GetUser() user: User) {
-    return this.habitsService.findAllByUser(user);
+  findAll(@GetUser() user: User, @Query() dto: GetHabitsDto) {
+    return this.habitsService.findAllByUser(user, dto);
   }
 
   @Get('logs')
@@ -66,6 +68,16 @@ export class HabitsController {
       updateHabitUserDto,
       user,
     );
+  }
+
+  @Patch(':habitId/lifecycle')
+  @ApiOperation({ summary: 'Pausar, archivar o restaurar un hábito personal' })
+  updateLifecycle(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Body() dto: UpdateHabitLifecycleDto,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.updateLifecycle(habitId, dto, user);
   }
 
   @Patch(':habitId')

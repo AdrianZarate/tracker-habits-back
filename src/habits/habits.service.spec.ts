@@ -13,6 +13,7 @@ import { model, Types } from 'mongoose';
 import { User, UserSchema } from '../auth/entities/user.entity';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { HabitsService } from './habits.service';
+import { HABIT_STATUSES, HabitStatus } from './entities/habit-user.entity';
 import {
   ConfigurationRevision,
   HabitConfiguration,
@@ -33,6 +34,16 @@ const query = (value: unknown) => ({
   lean: jest.fn().mockResolvedValue(value),
   exec: jest.fn().mockResolvedValue(value),
 });
+const pauseUpdate = [
+  {
+    $set: {
+      status: {
+        $cond: [{ $eq: ['$status', 'archived'] }, 'archived', 'paused'],
+      },
+      active: false,
+    },
+  },
+];
 const executableQuery = (value: unknown) => ({
   lean: jest.fn().mockReturnThis(),
   exec: jest.fn().mockResolvedValue(value),
@@ -95,6 +106,170 @@ describe('Owner-scoped habit calendar operations', () => {
   });
 
   afterEach(() => jest.useRealTimers());
+
+  describe('association lifecycle', () => {
+    it.each(HABIT_STATUSES)(
+      'transitions from %s to every state idempotently, changing no definitions or logs',
+      async (initial) => {
+        const stored = {
+          habitId,
+          status: initial,
+          active: initial === 'active',
+          title: 'Personal',
+          category: 'Learning',
+        };
+        association.findOneAndUpdate.mockImplementation(
+          (filter: unknown, update: { $set: object }, options: unknown) => {
+            expect(filter).toEqual({ userId: ownerId, habitId });
+            expect(options).toEqual({
+              returnDocument: 'after',
+              runValidators: true,
+            });
+            Object.assign(stored, update.$set);
+            return executableQuery({ ...stored });
+          },
+        );
+        for (const status of HABIT_STATUSES) {
+          Object.assign(stored, {
+            status: initial,
+            active: initial === 'active',
+          });
+          for (let attempt = 0; attempt < 2; attempt++) {
+            expect(
+              await service.updateLifecycle(id, { status }, account()),
+            ).toMatchObject({ ...stored, status, active: status === 'active' });
+            expect(association.findOneAndUpdate).toHaveBeenLastCalledWith(
+              { userId: ownerId, habitId },
+              { $set: { status, active: status === 'active' } },
+              { returnDocument: 'after', runValidators: true },
+            );
+          }
+        }
+        expect(habit.findOneAndUpdate).not.toHaveBeenCalled();
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+        expect(logs.deleteOne).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['missing', 'foreign'])(
+      'returns the same lifecycle 404 for %s',
+      async () => {
+        association.findOneAndUpdate.mockReturnValue(executableQuery(null));
+        await expect(
+          service.updateLifecycle(id, { status: 'archived' }, account()),
+        ).rejects.toEqual(
+          new NotFoundException('Habit not found for this user'),
+        );
+        expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+          { userId: ownerId, habitId },
+          { $set: { status: 'archived', active: false } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      },
+    );
+
+    it.each(['paused', 'archived'] as const)(
+      'fails closed for inconsistent %s and active=true progress',
+      async (status) => {
+        association.findOne.mockReturnValue(
+          query({ habitId, status, active: true }),
+        );
+        await expect(service.complete(id, account())).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        await expect(
+          service.complete(id, account(), { amount: 5 }),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        await expect(
+          service.updateLog(id, '2025-03-30', { completed: true }, account()),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+        expect(await service.findOneByUser(id, account())).toMatchObject({
+          status,
+          active: false,
+        });
+      },
+    );
+
+    it('uses active status as authority even when the legacy flag is false', async () => {
+      association.findOne.mockReturnValue(
+        query({ habitId, status: 'active', active: false }),
+      );
+      await expect(service.complete(id, account())).resolves.toMatchObject({
+        completed: true,
+      });
+      expect(await service.findOneByUser(id, account())).toMatchObject({
+        status: 'active',
+        active: true,
+      });
+    });
+
+    it.each(['active', 'paused', 'archived', 'all'] as const)(
+      'builds owner list filter %s after resolving legacy status',
+      async (status) => {
+        association.aggregate.mockResolvedValue([]);
+        await service.findAllByUser(account(), { status });
+        const calls = association.aggregate.mock.calls as unknown[][];
+        const pipeline = calls[0][0] as {
+          $match?: object;
+          $addFields?: object;
+        }[];
+        expect(pipeline[0]).toEqual({ $match: { userId: ownerId } });
+        expect(pipeline[1]).toHaveProperty('$addFields.status');
+        if (status === 'all')
+          expect(pipeline.filter((stage) => stage.$match)).toHaveLength(1);
+        else expect(pipeline[2]).toEqual({ $match: { status } });
+      },
+    );
+
+    it('rejects direct invalid lifecycle and filter input without writes', async () => {
+      await expect(
+        service.updateLifecycle(
+          id,
+          { status: 'deleted' as HabitStatus },
+          account(),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.findAllByUser(account(), { status: 'deleted' as HabitStatus }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(association.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(association.aggregate).not.toHaveBeenCalled();
+    });
+
+    it('rejects a duplicate-key race after a concurrent archive without an unguarded retry', async () => {
+      const stored = { status: 'paused', active: false };
+      habit.findOneAndUpdate.mockImplementation(() => {
+        stored.status = 'archived'; // Archive wins while catalog lookup is pending.
+        return Promise.resolve({ _id: habitId });
+      });
+      association.findOneAndUpdate.mockImplementation((filter: unknown) => {
+        expect(filter).toEqual({
+          userId: ownerId,
+          habitId,
+          status: { $ne: 'archived' },
+        });
+        expect(stored.status).toBe('archived');
+        return Promise.reject(
+          Object.assign(new Error('Duplicate association'), {
+            code: 11000,
+            keyPattern: { userId: 1, habitId: 1 },
+          }),
+        );
+      });
+      await expect(
+        service.create({ title: 'Read' }, account()),
+      ).rejects.toEqual(
+        new ConflictException(
+          'Habit already exists; explicit restore required via lifecycle',
+        ),
+      );
+      expect(association.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      expect(association.findOne).not.toHaveBeenCalled();
+      expect(stored).toEqual({ status: 'archived', active: false });
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+  });
 
   describe('weekly read model', () => {
     const checkbox: HabitConfiguration = {
@@ -353,6 +528,7 @@ describe('Owner-scoped habit calendar operations', () => {
         title: 'Read',
         slug: 'read',
         active,
+        status: active ? 'active' : 'paused',
       });
       expect(association.findOne).toHaveBeenCalledWith({
         userId: ownerId,
@@ -404,6 +580,7 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(await service.findOneByUser(id, account())).toEqual({
       habitId,
       active: false,
+      status: 'paused',
       title: 'My reading',
       category: 'Learning',
       color: '#123abc',
@@ -458,8 +635,10 @@ describe('Owner-scoped habit calendar operations', () => {
         expect.objectContaining({ upsert: true }),
       );
       expect(association.findOneAndUpdate).toHaveBeenCalledWith(
-        { userId: ownerId, habitId },
-        expect.objectContaining({ $set: { active: true, title: 'Read' } }),
+        { userId: ownerId, habitId, status: { $ne: 'archived' } },
+        expect.objectContaining({
+          $set: { active: true, status: 'active', title: 'Read' },
+        }),
         expect.objectContaining({ upsert: true }),
       );
       expect(catalog.title).toBe('Original catalog');
@@ -471,7 +650,18 @@ describe('Owner-scoped habit calendar operations', () => {
     await service.findAllByUser(account());
     expect(association.aggregate).toHaveBeenCalledWith(
       expect.arrayContaining([
-        { $match: { userId: ownerId, active: true } },
+        { $match: { userId: ownerId } },
+        {
+          $addFields: {
+            status: {
+              $ifNull: [
+                '$status',
+                { $cond: [{ $eq: ['$active', true] }, 'active', 'paused'] },
+              ],
+            },
+          },
+        },
+        { $match: { status: 'active' } },
         {
           $project: {
             _id: 0,
@@ -482,6 +672,8 @@ describe('Owner-scoped habit calendar operations', () => {
             color: { $ifNull: ['$color', '$$REMOVE'] },
             icon: { $ifNull: ['$icon', '$$REMOVE'] },
             configurationRevisions: 1,
+            status: 1,
+            active: 1,
           },
         },
       ]),
@@ -554,6 +746,7 @@ describe('Owner-scoped habit calendar operations', () => {
       ).toEqual({
         habitId,
         active,
+        status: active ? 'active' : 'paused',
         title: 'Personal read',
         color: '#abcdef',
         slug: 'read',
@@ -600,6 +793,7 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(await service.updateDefinition(id, {}, account())).toEqual({
       habitId,
       active: true,
+      status: 'active',
       title: 'Read',
       slug: 'read',
     });
@@ -621,10 +815,11 @@ describe('Owner-scoped habit calendar operations', () => {
       account(),
     );
     expect(association.findOneAndUpdate).toHaveBeenCalledWith(
-      { userId: ownerId, habitId },
+      { userId: ownerId, habitId, status: { $ne: 'archived' } },
       expect.objectContaining({
         $set: {
           active: true,
+          status: 'active',
           title: 'Read',
           category: 'Learning',
           color: '#abcdef',
@@ -670,9 +865,9 @@ describe('Owner-scoped habit calendar operations', () => {
     });
     await service.create({ title: 'Read' }, account('America/Los_Angeles'));
     expect(association.findOneAndUpdate).toHaveBeenCalledWith(
-      { userId: ownerId, habitId },
+      { userId: ownerId, habitId, status: { $ne: 'archived' } },
       {
-        $set: { title: 'Read', active: true },
+        $set: { title: 'Read', active: true, status: 'active' },
         $setOnInsert: {
           configurationRevisions: [
             {
@@ -849,13 +1044,14 @@ describe('Owner-scoped habit calendar operations', () => {
     ];
     const row = {
       habitId,
+      active: true,
       title: 'Read',
       slug: 'read',
       configurationRevisions: revisions,
     };
     association.aggregate.mockResolvedValue([
       row,
-      { habitId, title: 'Legacy', slug: 'legacy' },
+      { habitId, active: true, title: 'Legacy', slug: 'legacy' },
     ]);
     association.findOne.mockReturnValue(query({ ...row, active: false }));
     const [listed, legacy] = await service.findAllByUser(
@@ -867,13 +1063,21 @@ describe('Owner-scoped habit calendar operations', () => {
     );
     expect(listed).toEqual({
       habitId,
+      active: true,
+      status: 'active',
       title: 'Read',
       slug: 'read',
       configuration: revisions[0].configuration,
       pendingConfiguration: revisions[1],
     });
-    expect(detail).toEqual({ ...listed, active: false });
-    expect(legacy).toEqual({ habitId, title: 'Legacy', slug: 'legacy' });
+    expect(detail).toEqual({ ...listed, active: false, status: 'paused' });
+    expect(legacy).toEqual({
+      habitId,
+      active: true,
+      status: 'active',
+      title: 'Legacy',
+      slug: 'legacy',
+    });
     expect(row.configurationRevisions).toEqual(revisions);
   });
 
@@ -1777,7 +1981,6 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(association.findOne).toHaveBeenCalledWith({
       userId: ownerId,
       habitId,
-      active: true,
     });
     expect(await service.deleteHabitLog(id, user)).toEqual({
       acknowledged: true,
@@ -1846,11 +2049,12 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(await service.update(id, account())).toEqual({
       habitId,
       active: false,
+      status: 'paused',
       configuration,
     });
     expect(association.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: ownerId, habitId },
-      { active: false },
+      pauseUpdate,
       { returnDocument: 'after' },
     );
   });
@@ -1863,11 +2067,12 @@ describe('Owner-scoped habit calendar operations', () => {
       expect(await service.update(id, account())).toEqual({
         habitId,
         active: false,
+        status: 'paused',
       });
     }
     expect(association.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: ownerId, habitId },
-      { active: false },
+      pauseUpdate,
       { returnDocument: 'after' },
     );
     association.findOneAndUpdate.mockReturnValue(executableQuery(null));

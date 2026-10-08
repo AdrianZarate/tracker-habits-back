@@ -81,6 +81,8 @@ const path = (habit = owned, suffix = '') =>
 // Doubles interpret service-supplied filters, never decide access by URL.
 function matches(row: Row, filter: Row): boolean {
   return Object.entries(filter).every(([key, value]) => {
+    if (value && typeof value === 'object' && '$ne' in value)
+      return scalar(row[key]) !== scalar(value.$ne);
     if (
       key === 'date' &&
       value &&
@@ -102,6 +104,16 @@ function matches(row: Row, filter: Row): boolean {
 const executable = (value: unknown) => ({
   lean: () => ({ exec: () => Promise.resolve(value) }),
 });
+const pauseUpdate = [
+  {
+    $set: {
+      status: {
+        $cond: [{ $eq: ['$status', 'archived'] }, 'archived', 'paused'],
+      },
+      active: false,
+    },
+  },
+];
 const log = (
   n: number,
   userId: Types.ObjectId,
@@ -147,6 +159,9 @@ describe('Isolated HTTP security and habit contracts', () => {
     })),
   };
   const habitModel = {
+    findOneAndUpdate: jest.fn((filter: Row) =>
+      Promise.resolve(catalog.find((row) => matches(row, filter))),
+    ),
     findOne: jest.fn((filter: Row) => ({
       lean: () =>
         Promise.resolve(catalog.find((row) => matches(row, filter)) ?? null),
@@ -159,11 +174,67 @@ describe('Isolated HTTP security and habit contracts', () => {
           associations.find((row) => matches(row, filter)) ?? null,
         ),
     })),
-    findOneAndUpdate: jest.fn((filter: Row, update: Row, options: Row) => {
-      void options;
-      const row = associations.find((row) => matches(row, filter));
-      if (row) Object.assign(row, update);
-      return executable(row ?? null);
+    findOneAndUpdate: jest.fn(
+      (filter: Row, update: Row | Row[], options: Row) => {
+        let row = associations.find((row) => matches(row, filter));
+        if (!row && options.upsert) {
+          // Model the unique owner/habit key, including an excluded archive.
+          if (
+            associations.some((existing) =>
+              matches(existing, {
+                userId: filter.userId,
+                habitId: filter.habitId,
+              }),
+            )
+          )
+            return Promise.reject(
+              Object.assign(new Error('Duplicate association'), {
+                code: 11000,
+              }),
+            );
+          row = {
+            userId: filter.userId,
+            habitId: filter.habitId,
+            ...((update as Row).$setOnInsert as Row),
+          };
+          associations.push(row);
+        }
+        if (row) {
+          if (Array.isArray(update)) {
+            expect(update).toEqual(pauseUpdate);
+            Object.assign(row, {
+              status: row.status === 'archived' ? 'archived' : 'paused',
+              active: false,
+            });
+          } else {
+            Object.assign(row, update.$set);
+            for (const key of Object.keys((update.$unset as Row) ?? {}))
+              delete row[key];
+          }
+        }
+        const result = executable(row ?? null);
+        return { ...result, toObject: () => ({ ...row }) };
+      },
+    ),
+    aggregate: jest.fn((pipeline: { $match?: Row; $addFields?: Row }[]) => {
+      let rows = associations.map((row) => ({ ...row }));
+      for (const stage of pipeline) {
+        if (stage.$match)
+          rows = rows.filter((row) => matches(row, stage.$match!));
+        if (stage.$addFields)
+          rows = rows.map((row) => ({
+            ...row,
+            status: row.status ?? (row.active === true ? 'active' : 'paused'),
+          }));
+      }
+      return Promise.resolve(
+        rows.map((row) => {
+          const habit = catalog.find(
+            (habit) => scalar(habit._id) === scalar(row.habitId),
+          )!;
+          return { ...row, title: row.title ?? habit.title, slug: habit.slug };
+        }),
+      );
     }),
   };
   const logModel = {
@@ -235,6 +306,220 @@ describe('Isolated HTTP security and habit contracts', () => {
   const range = (habitId: Types.ObjectId, start: string, end: string) => ({
     ...scope(habitId),
     date: { $gte: anchor(start), $lte: anchor(end) },
+  });
+
+  describe('lifecycle', () => {
+    it.each(['active', 'paused', 'archived'])(
+      'sets %s idempotently and retains history',
+      async (status) => {
+        const before = json(logs);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const response = await send('patch', path(owned, '/lifecycle'))
+            .send({ status })
+            .expect(200);
+          expect(response.body).toMatchObject({
+            status,
+            active: status === 'active',
+          });
+        }
+        expect(json(logs)).toEqual(before);
+      },
+    );
+
+    it('retains original snapshots, pending definitions and inactive history through archive/edit/restore', async () => {
+      const configuration = {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      };
+      const original = {
+        revisionId: id(50).toHexString(),
+        effectiveFrom: '2025-03-01',
+        configuration,
+      };
+      const pending = { ...original, effectiveFrom: '2025-04-01' };
+      associations[0].configurationRevisions = [original, pending];
+      Object.assign(logs[0], {
+        configurationSnapshot: original,
+        amount: 15,
+        note: 'Original goal',
+      });
+      const before = json(logs);
+      await send('patch', path(owned, '/lifecycle'))
+        .send({ status: 'archived' })
+        .expect(200);
+      const edited = await send('patch', path(owned, '/definition'))
+        .send({ title: 'Personal archive', color: '#123abc' })
+        .expect(200);
+      expect(edited.body).toMatchObject({
+        status: 'archived',
+        active: false,
+        title: 'Personal archive',
+        configuration,
+        pendingConfiguration: pending,
+      });
+      const history = await send(
+        'get',
+        path(owned, '/logs?startDate=2025-03-01&endDate=2025-04-01'),
+      ).expect(200);
+      expect(history.body).toEqual(
+        json(logs.filter((row) => matches(row, scope()))),
+      );
+      await send('get', path(owned, '/week')).expect(200);
+      await send('patch', path(owned, '/lifecycle'))
+        .send({ status: 'active' })
+        .expect(200);
+      expect(json(logs)).toEqual(before);
+      expect(associations[0].configurationRevisions).toEqual([
+        original,
+        pending,
+      ]);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(logModel.deleteOne).not.toHaveBeenCalled();
+    });
+
+    it('never lets the old pause endpoint downgrade an archive', async () => {
+      await send('patch', path(owned, '/lifecycle'))
+        .send({ status: 'archived' })
+        .expect(200);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await send('patch', path()).expect(200);
+        expect(response.body).toMatchObject({
+          status: 'archived',
+          active: false,
+        });
+      }
+    });
+
+    it('requires explicit restore for archived POST and preserves configuration on paused POST', async () => {
+      const configurationRevisions = [
+        {
+          revisionId: id(50).toHexString(),
+          effectiveFrom: '2025-03-01',
+          configuration: {
+            schedule: { kind: 'daily' },
+            goal: { kind: 'checkbox' },
+          },
+        },
+      ];
+      Object.assign(associations[0], {
+        status: 'archived',
+        active: false,
+        configurationRevisions,
+      });
+      const before = json(associations);
+      const rejected = await send('post', '/habits')
+        .send({ title: 'Read daily' })
+        .expect(409);
+      expect((rejected.body as Row).message).toContain(
+        'explicit restore required',
+      );
+      expect(json(associations)).toEqual(before);
+      await send('patch', path(owned, '/lifecycle'))
+        .send({ status: 'paused' })
+        .expect(200);
+      const response = await send('post', '/habits')
+        .send({
+          title: 'Read daily',
+          configuration: {
+            schedule: { kind: 'weekly', timesPerWeek: 2 },
+            goal: { kind: 'checkbox' },
+          },
+        })
+        .expect(201);
+      expect(response.body).toMatchObject({
+        status: 'active',
+        active: true,
+        configuration: configurationRevisions[0].configuration,
+      });
+      expect(associations[0].configurationRevisions).toEqual(
+        configurationRevisions,
+      );
+    });
+
+    it.each([undefined, 'active', 'paused', 'archived', 'all'])(
+      'filters list by %s with legacy fallback and owner isolation',
+      async (status) => {
+        associations.push({
+          userId: owner,
+          habitId: foreign,
+          status: 'archived',
+          active: true,
+          title: 'Personal archive',
+          color: '#123abc',
+        });
+        const response = await send(
+          'get',
+          `/habits${status ? `?status=${status}` : ''}`,
+        ).expect(200);
+        const rows = response.body as Row[];
+        const expected =
+          status === 'all'
+            ? ['active', 'paused', 'archived']
+            : [status ?? 'active'];
+        expect(rows.map((row) => row.status)).toEqual(expected);
+        expect(
+          rows.every((row) => row.active === (row.status === 'active')),
+        ).toBe(true);
+        if (status === 'archived')
+          expect(rows[0]).toMatchObject({
+            title: 'Personal archive',
+            color: '#123abc',
+          });
+      },
+    );
+
+    it.each(['status=deleted', 'status=active&status=paused', 'active=true'])(
+      'rejects invalid list query %s',
+      async (query) => {
+        await send('get', `/habits?${query}`).expect(400);
+      },
+    );
+
+    it.each([foreign, missing])(
+      'hides unowned lifecycle IDs %s',
+      async (habit) => {
+        await send('patch', path(habit, '/lifecycle'))
+          .send({ status: 'archived' })
+          .expect(404);
+      },
+    );
+
+    it.each([
+      {},
+      { status: null },
+      { status: 'deleted' },
+      { status: 'paused', active: false },
+    ])('rejects invalid lifecycle payload %j', async (body) => {
+      await send('patch', path(owned, '/lifecycle')).send(body).expect(400);
+    });
+
+    it('requires authentication for lifecycle writes', async () => {
+      await request(app.getHttpServer())
+        .patch(path(owned, '/lifecycle'))
+        .send({ status: 'paused' })
+        .expect(401);
+    });
+
+    it.each(['paused', 'archived'])(
+      'blocks new progress for inconsistent %s rows but permits existing correction',
+      async (status) => {
+        Object.assign(associations[0], { status, active: true });
+        const before = json(logs);
+        await send('post', path(owned, '/complete')).expect(404);
+        await send('post', path(owned, '/complete'))
+          .send({ amount: 5 })
+          .expect(404);
+        await send('patch', path(owned, '/logs/2025-03-30'))
+          .send({ completed: true })
+          .expect(404);
+        expect(json(logs)).toEqual(before);
+        await send('patch', path(owned, '/logs/2025-03-31'))
+          .send({ completed: false })
+          .expect(200);
+        await send('get', path()).expect(200);
+        await send('get', path(owned, '/week')).expect(200);
+      },
+    );
   });
 
   beforeAll(async () => {
@@ -519,12 +804,15 @@ describe('Isolated HTTP security and habit contracts', () => {
   ] as const)(
     'reads owned %s including inactive associations',
     async (habitId, active, habit) => {
-      await send('get', path(habitId)).expect(200).expect({
-        habitId: habitId.toHexString(),
-        title: habit.title,
-        slug: habit.slug,
-        active,
-      });
+      await send('get', path(habitId))
+        .expect(200)
+        .expect({
+          habitId: habitId.toHexString(),
+          title: habit.title,
+          slug: habit.slug,
+          active,
+          status: active ? 'active' : 'paused',
+        });
       expect(associationModel.findOne).toHaveBeenCalledWith(scope(habitId));
       expect(habitModel.findOne).toHaveBeenCalledWith({ _id: habitId });
     },
@@ -562,10 +850,7 @@ describe('Isolated HTTP security and habit contracts', () => {
     async (habitId) => {
       const before = json(logs);
       await send('post', path(habitId, '/complete')).expect(404);
-      expect(associationModel.findOne).toHaveBeenCalledWith({
-        ...scope(habitId),
-        active: true,
-      });
+      expect(associationModel.findOne).toHaveBeenCalledWith(scope(habitId));
       expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
       expect(json(logs)).toEqual(before);
     },
@@ -575,14 +860,14 @@ describe('Isolated HTTP security and habit contracts', () => {
     await send('patch', path(foreign)).expect(404);
     expect(associationModel.findOneAndUpdate).toHaveBeenCalledWith(
       scope(foreign),
-      { active: false },
+      pauseUpdate,
       { returnDocument: 'after' },
     );
     expect(associations[2].active).toBe(true);
     for (let n = 0; n < 2; n++) {
       await send('patch', path())
         .expect(200)
-        .expect(json({ ...scope(), active: false }));
+        .expect(json({ ...scope(), active: false, status: 'paused' }));
     }
   });
 

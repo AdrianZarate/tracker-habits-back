@@ -11,6 +11,8 @@ import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { GetHabitWeekDto } from './dto/get-habit-week.dto';
+import { GetHabitsDto } from './dto/get-habits.dto';
+import { UpdateHabitLifecycleDto } from './dto/update-habit-lifecycle.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { HabitsController } from './habits.controller';
@@ -54,6 +56,8 @@ describe('Personal definition controller plumbing', () => {
     getWeek: jest.fn(),
     update: jest.fn(),
     updateDefinition: jest.fn(),
+    updateLifecycle: jest.fn(),
+    findAllByUser: jest.fn(),
   };
   const controller = new HabitsController(service as unknown as HabitsService);
   const pipe = new ValidationPipe({
@@ -281,6 +285,53 @@ describe('Personal definition controller plumbing', () => {
     });
     await controller.getWeek(habitId, {}, user);
     expect(service.getWeek).toHaveBeenLastCalledWith(habitId, user, {});
+  });
+
+  it('declares dedicated authenticated lifecycle PATCH with concrete DTO and Mongo-ID pipe', async () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      HabitsController.prototype,
+      'updateLifecycle',
+    )!.value as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      ':habitId/lifecycle',
+    );
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.PATCH,
+    );
+    expect(
+      Reflect.getMetadata(
+        'design:paramtypes',
+        HabitsController.prototype,
+        'updateLifecycle',
+      ),
+    ).toEqual([String, UpdateHabitLifecycleDto, User]);
+    const args = Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      HabitsController,
+      'updateLifecycle',
+    ) as Record<string, { index: number; pipes: unknown[] }>;
+    expect(Object.values(args)).toContainEqual(
+      expect.objectContaining({ index: 0, pipes: [ParseMongoIdPipe] }),
+    );
+    await controller.updateLifecycle(habitId, { status: 'archived' }, user);
+    expect(service.updateLifecycle).toHaveBeenCalledWith(
+      habitId,
+      { status: 'archived' },
+      user,
+    );
+    expect(service.update).not.toHaveBeenCalled();
+  });
+
+  it('forwards status list query with authenticated ownership and a concrete DTO', async () => {
+    expect(
+      Reflect.getMetadata(
+        'design:paramtypes',
+        HabitsController.prototype,
+        'findAll',
+      ),
+    ).toEqual([User, GetHabitsDto]);
+    await controller.findAll(user, { status: 'all' });
+    expect(service.findAllByUser).toHaveBeenCalledWith(user, { status: 'all' });
   });
 
   it('keeps the original empty PATCH as deactivation', async () => {

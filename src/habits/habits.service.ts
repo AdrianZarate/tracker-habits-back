@@ -21,6 +21,9 @@ import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { GetHabitsDto } from './dto/get-habits.dto';
+import { UpdateHabitLifecycleDto } from './dto/update-habit-lifecycle.dto';
+import { HABIT_STATUSES, HabitStatus } from './entities/habit-user.entity';
 import { GetHabitWeekDto } from './dto/get-habit-week.dto';
 import { isoWeekDates, scheduledOnDate } from './configuration/habit-week';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
@@ -36,7 +39,14 @@ import {
 
 type HabitListRow = Pick<
   HabitUser,
-  'habitId' | 'title' | 'category' | 'color' | 'icon' | 'configurationRevisions'
+  | 'habitId'
+  | 'title'
+  | 'category'
+  | 'color'
+  | 'icon'
+  | 'configurationRevisions'
+  | 'status'
+  | 'active'
 > &
   Pick<Habit, 'slug'>;
 
@@ -74,6 +84,7 @@ export class HabitsService {
       trim: true,
     });
 
+    let associationWrite = false;
     try {
       // 1️ Obtener o crear hábito global
       const habit = await this.habitModel.findOneAndUpdate(
@@ -90,10 +101,13 @@ export class HabitsService {
       );
 
       // 2️ Crear o reactivar relación usuario-hábito
+      associationWrite = true;
       const habitUser = await this.habitUserModel.findOneAndUpdate(
         {
           userId: user._id,
           habitId: habit._id,
+          // Atomic exclusion: an archive winning before this write cannot reopen.
+          status: { $ne: 'archived' },
         },
         {
           ...this.personalUpdate(createHabitDto, true),
@@ -112,20 +126,45 @@ export class HabitsService {
       );
 
       return this.associationView(habitUser.toObject(), today);
-    } catch (error) {
+    } catch (error: unknown) {
+      // The unique owner/habit key collides when the archive exclusion prevents
+      // a match (including a concurrent archive). Do not retry without the guard.
+      if (
+        associationWrite &&
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 11000
+      )
+        throw new ConflictException(
+          'Habit already exists; explicit restore required via lifecycle',
+        );
       this.commonService.handleExceptions(error, 'Habit');
     }
   }
 
-  async findAllByUser(user: User) {
+  async findAllByUser(user: User, dto: GetHabitsDto = {}) {
+    const status = dto.status ?? 'active';
+    if (![...HABIT_STATUSES, 'all'].includes(status))
+      throw new BadRequestException('Invalid habit status filter');
     const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
     const rows = await this.habitUserModel.aggregate<HabitListRow>([
       {
         $match: {
           userId: new Types.ObjectId(user._id),
-          active: true,
         },
       },
+      {
+        $addFields: {
+          status: {
+            $ifNull: [
+              '$status',
+              { $cond: [{ $eq: ['$active', true] }, 'active', 'paused'] },
+            ],
+          },
+        },
+      },
+      ...(status === 'all' ? [] : [{ $match: { status } }]),
       {
         $lookup: {
           from: 'habits',
@@ -145,6 +184,8 @@ export class HabitsService {
           color: { $ifNull: ['$color', '$$REMOVE'] },
           icon: { $ifNull: ['$icon', '$$REMOVE'] },
           configurationRevisions: 1,
+          status: 1,
+          active: 1,
         },
       },
     ]);
@@ -165,10 +206,28 @@ export class HabitsService {
   }
 
   private associationView<
-    T extends { configurationRevisions?: HabitUser['configurationRevisions'] },
+    T extends {
+      configurationRevisions?: HabitUser['configurationRevisions'];
+      status?: HabitStatus;
+      active?: boolean;
+    },
   >(row: T, today: string) {
     const { configurationRevisions, ...fields } = row;
-    return { ...fields, ...configurationView(configurationRevisions, today) };
+    const status = this.lifecycleStatus(row);
+    return {
+      ...fields,
+      status,
+      active: status === 'active',
+      ...configurationView(configurationRevisions, today),
+    };
+  }
+
+  private lifecycleStatus(row: {
+    status?: HabitStatus;
+    active?: boolean;
+  }): HabitStatus {
+    if (row.status !== undefined) return row.status;
+    return row.active === true ? 'active' : 'paused';
   }
 
   private configurationRevision(
@@ -200,6 +259,7 @@ export class HabitsService {
       HabitUser,
       | 'habitId'
       | 'active'
+      | 'status'
       | 'title'
       | 'category'
       | 'color'
@@ -219,7 +279,8 @@ export class HabitsService {
       habitId: habitUser.habitId,
       title: habitUser.title ?? habit.title,
       slug: habit.slug,
-      active: habitUser.active,
+      status: this.lifecycleStatus(habitUser),
+      active: this.lifecycleStatus(habitUser) === 'active',
       ...(habitUser.category != null ? { category: habitUser.category } : {}),
       ...(habitUser.color != null ? { color: habitUser.color } : {}),
       ...(habitUser.icon != null ? { icon: habitUser.icon } : {}),
@@ -230,7 +291,10 @@ export class HabitsService {
   private personalUpdate(dto: UpdateHabitUserDto, active?: boolean) {
     const $set: Record<string, string | boolean> = {};
     const $unset: Record<string, 1> = {};
-    if (active !== undefined) $set.active = active;
+    if (active !== undefined) {
+      $set.active = active;
+      $set.status = active ? 'active' : 'paused';
+    }
     if (dto.title !== undefined) $set.title = dto.title;
     for (const key of ['category', 'color', 'icon'] as const) {
       if (dto[key] === '') $unset[key] = 1;
@@ -275,6 +339,35 @@ export class HabitsService {
     return this.personalView(habitUser, today);
   }
 
+  async updateLifecycle(
+    habitId: string,
+    dto: UpdateHabitLifecycleDto,
+    user: User,
+  ) {
+    if (
+      !dto ||
+      !HABIT_STATUSES.includes(dto.status) ||
+      Object.keys(dto).some((key) => key !== 'status')
+    )
+      throw new BadRequestException(
+        'Expected only a required lifecycle status',
+      );
+    const habitUser = await this.habitUserModel
+      .findOneAndUpdate(
+        { userId: user._id, habitId: new Types.ObjectId(habitId) },
+        { $set: { status: dto.status, active: dto.status === 'active' } },
+        { returnDocument: 'after', runValidators: true },
+      )
+      .lean()
+      .exec();
+    if (!habitUser)
+      throw new NotFoundException('Habit not found for this user');
+    return this.associationView(
+      habitUser,
+      calendarDay(new Date(), user.timeZone ?? 'UTC'),
+    );
+  }
+
   async update(habitId: string, user: User) {
     const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
     const habitUser = await this.habitUserModel
@@ -283,9 +376,17 @@ export class HabitsService {
           userId: user._id,
           habitId: new Types.ObjectId(habitId),
         },
-        {
-          active: false,
-        },
+        // Evaluate stored state atomically, never downgrade a concurrent archive.
+        [
+          {
+            $set: {
+              status: {
+                $cond: [{ $eq: ['$status', 'archived'] }, 'archived', 'paused'],
+              },
+              active: false,
+            },
+          },
+        ],
         {
           returnDocument: 'after',
         },
@@ -309,9 +410,9 @@ export class HabitsService {
       date: dayLabelToUtcAnchor(day),
     };
     const habitUser = await this.habitUserModel
-      .findOne({ userId: filter.userId, habitId: filter.habitId, active: true })
+      .findOne({ userId: filter.userId, habitId: filter.habitId })
       .lean();
-    if (!habitUser) {
+    if (!habitUser || this.lifecycleStatus(habitUser) !== 'active') {
       throw new NotFoundException('Habit not active for this user');
     }
 
@@ -423,7 +524,7 @@ export class HabitsService {
     const resolved = () =>
       resolveConfigurationForDate(habitUser.configurationRevisions, day);
     if (!log) {
-      if (!habitUser.active)
+      if (this.lifecycleStatus(habitUser) !== 'active')
         throw new NotFoundException('Habit not active for this user');
       if (dto.amount === undefined && dto.completed === undefined)
         throw new BadRequestException('New records require explicit progress');
