@@ -12,6 +12,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { HabitsService } from './habits.service';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
+import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
@@ -83,6 +84,19 @@ export class HabitsController {
     @GetUser() user: User,
   ) {
     return this.habitsService.complete(habitId, user, completeHabitDto);
+  }
+
+  @Patch(':habitId/logs/:date')
+  @ApiOperation({
+    summary: 'Corregir progreso o notas de una fecha del usuario',
+  })
+  updateLog(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Param('date') date: string,
+    @Body() dto: UpdateHabitLogDto,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.updateLog(habitId, date, dto, user);
   }
 
   @Get(':habitId/logs')

@@ -163,16 +163,57 @@ Habit-log reads and owner-wide summaries expose `amount` and
 `DELETE /habits/:habitId/incomplete` still deletes today's record; it does not
 redesign historical undo.
 
+## Correct progress or notes for a date
+
+Use `PATCH /habits/:habitId/logs/:date`, for example
+`PATCH /habits/000000000000000000000001/logs/2025-03-31`:
+
+```json
+{ "amount": 15, "note": "Corrected reading total" }
+```
+
+The date must be a real `YYYY-MM-DD` calendar label no later than **today in the
+account timezone** (UTC by default). Timestamp strings, invalid dates and future
+labels return 400. Stored dates remain UTC label anchors, not converted local
+midnights.
+
+| Operation | Contract |
+| --- | --- |
+| Quantity correction | Supply `amount`, a finite replacement total 0–1e9. Completion is derived from the original threshold; `completed` is rejected. |
+| Checkbox correction | Supply an explicit boolean `completed`, including `false`. `amount` is rejected. |
+| Notes-only correction | Supply `note` on an existing record. Amount, completion and snapshot remain exactly unchanged, even for a legacy missing amount. |
+| Set or clear note | Trimmed string, at most 2000 characters. Empty or whitespace-only strings unset the stored field. Omission preserves it. |
+| New past/current record | Requires active authenticated ownership, explicit progress and a selected weekday when applicable. Notes alone return 400. |
+| Existing record | Requires authenticated ownership; inactive habits and previously recorded nonselected weekdays can be corrected without reactivation. |
+| Invalid payload | Empty payloads, unknown fields, null and incorrect types return 400. At least one supported field is required. |
+
+Corrections replace current values; they do not create an audit trail. A stored
+`configurationSnapshot` always wins over later definition edits. Snapshotless
+legacy records use the T2 definition effective on the requested date (daily
+checkbox before the first revision). No snapshot is backfilled and no amount is
+inferred from a boolean. New records insert their original snapshot only once;
+a concurrent insert winner's original goal is re-evaluated before correction.
+
+Final writes guard the original log `_id` as well as owner, habit and date. If
+concurrent undo/reinsert removes that identity, the request returns **409** rather
+than overwriting a replacement record; reload before retrying. This guards
+identity, not simultaneous corrections to the same surviving record.
+
+Both `GET /habits/:habitId/logs` and `GET /habits/logs` expose `note` only when
+stored. Bodyless completion remains compatible and does not edit notes; current-
+day undo still deletes the whole current-day record.
+
 ## Scope and verification
 
-Current-day measured recording and original snapshots are implemented. Historical
-correction, notes, weekly summaries, pause/archive and frontend controls remain
-later work; there is no bulk migration or automatic recalculation of history.
+Current-day measured recording, original snapshots, notes and historical
+correction are implemented. Weekly summaries, pause/archive and frontend controls
+remain later work; there is no bulk migration or automatic recalculation of history.
 
 Deterministic helper, schema, service, DTO, controller and synthetic HTTP tests
 cover strict validation, dates/timezones/DST, original goals, pending changes,
 replacement totals, thresholds, schedules, legacy compatibility, immutable
-snapshots and owner/activity checks. Concurrent-winner and duplicate-key tests
+snapshots, notes-only preservation, historical corrections, legacy quantity gaps,
+owner/activity checks and undo/reinsert conflicts. Concurrent-winner and duplicate-key tests
 inspect Mongo update contracts using doubles, not live MongoDB execution. HTTP
 regressions use synthetic fixtures without a database or private environment
 configuration.

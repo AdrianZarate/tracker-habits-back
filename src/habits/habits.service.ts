@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -18,6 +19,7 @@ import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
+import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
@@ -39,7 +41,7 @@ type HabitListRow = Pick<
 /** Shape produced by the global-habit lookup and log projection below. */
 type HabitLogSummary = Pick<
   HabitLog,
-  'date' | 'completed' | 'amount' | 'configurationSnapshot'
+  'date' | 'completed' | 'amount' | 'note' | 'configurationSnapshot'
 > &
   Pick<Habit, 'title' | 'slug'> & {
     _id: Types.ObjectId;
@@ -393,6 +395,147 @@ export class HabitsService {
     return { amount, completed: amount >= goal.target };
   }
 
+  async updateLog(
+    habitId: string,
+    day: string,
+    dto: UpdateHabitLogDto,
+    user: User,
+  ) {
+    const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
+    const date = this.queryAnchor(day);
+    if (day > today)
+      throw new BadRequestException('Cannot record future dates');
+    const note = this.validatedLogPatch(dto);
+    const filter = {
+      userId: user._id,
+      habitId: new Types.ObjectId(habitId),
+      date,
+    };
+    const habitUser = await this.habitUserModel
+      .findOne({ userId: filter.userId, habitId: filter.habitId })
+      .lean();
+    if (!habitUser)
+      throw new NotFoundException('Habit not found for this user');
+
+    let log = await this.habitLogModel.findOne(filter).lean();
+    const resolved = () =>
+      resolveConfigurationForDate(habitUser.configurationRevisions, day);
+    if (!log) {
+      if (!habitUser.active)
+        throw new NotFoundException('Habit not active for this user');
+      if (dto.amount === undefined && dto.completed === undefined)
+        throw new BadRequestException('New records require explicit progress');
+      const snapshot = resolved();
+      const progress = this.correctionProgress(dto, snapshot.configuration);
+      const schedule = snapshot.configuration.schedule;
+      const weekday = date.getUTCDay() || 7;
+      if (schedule.kind === 'weekdays' && !schedule.days.includes(weekday))
+        throw new BadRequestException('Habit is not scheduled for this date');
+      try {
+        // Insert-only authority: a competing writer's original snapshot wins.
+        log = await this.habitLogModel
+          .findOneAndUpdate(
+            filter,
+            {
+              $setOnInsert: {
+                configurationSnapshot: snapshot,
+                ...progress,
+                ...(note ? { note } : {}),
+              },
+            },
+            { upsert: true, returnDocument: 'after', runValidators: true },
+          )
+          .lean()
+          .exec();
+      } catch (error: unknown) {
+        if (
+          typeof error !== 'object' ||
+          error === null ||
+          !('code' in error) ||
+          error.code !== 11000
+        )
+          throw error;
+        log = await this.habitLogModel.findOne(filter).lean();
+      }
+    }
+    if (!log)
+      throw new ConflictException('Habit log changed; retry correction');
+    // Notes-only edits do not derive progress, fill legacy gaps or touch snapshots.
+    const progress =
+      dto.amount === undefined && dto.completed === undefined
+        ? {}
+        : this.correctionProgress(
+            dto,
+            log.configurationSnapshot
+              ? parseConfiguration(log.configurationSnapshot.configuration)
+              : resolved().configuration,
+          );
+    const $set = { ...progress, ...(note ? { note } : {}) };
+    const result = await this.habitLogModel
+      .findOneAndUpdate(
+        { ...filter, _id: log._id },
+        {
+          ...(Object.keys($set).length ? { $set } : {}),
+          ...(note === '' ? { $unset: { note: 1 } } : {}),
+        },
+        { returnDocument: 'after', runValidators: true },
+      )
+      .lean()
+      .exec();
+    // Undo/reinsert must not cause a correction to overwrite the new identity.
+    if (!result)
+      throw new ConflictException('Habit log changed; retry correction');
+    return result;
+  }
+
+  private validatedLogPatch(dto: UpdateHabitLogDto) {
+    if (
+      typeof dto !== 'object' ||
+      dto === null ||
+      Array.isArray(dto) ||
+      !Object.keys(dto).length ||
+      Object.keys(dto).some(
+        (key) => !['amount', 'completed', 'note'].includes(key),
+      ) ||
+      !Object.values(dto).some((value: unknown) => value !== undefined)
+    )
+      throw new BadRequestException('Expected amount, completed and/or note');
+    if (
+      dto.amount !== undefined &&
+      (typeof dto.amount !== 'number' ||
+        !Number.isFinite(dto.amount) ||
+        dto.amount < 0 ||
+        dto.amount > 1e9)
+    )
+      throw new BadRequestException('Expected a finite amount 0..1e9');
+    if (dto.completed !== undefined && typeof dto.completed !== 'boolean')
+      throw new BadRequestException('Expected a boolean completed flag');
+    if (dto.note !== undefined) {
+      if (typeof dto.note !== 'string' || dto.note.trim().length > 2000)
+        throw new BadRequestException(
+          'Expected a note of at most 2000 characters',
+        );
+      return dto.note.trim();
+    }
+    return undefined;
+  }
+
+  private correctionProgress(
+    dto: UpdateHabitLogDto,
+    configuration: HabitConfiguration,
+  ) {
+    if (configuration.goal.kind === 'quantity') {
+      if (dto.completed !== undefined)
+        throw new BadRequestException('Quantity goals do not accept completed');
+      return this.completionProgress({ amount: dto.amount }, configuration);
+    }
+    if (dto.amount !== undefined)
+      throw new BadRequestException('Checkbox goals do not accept amount');
+    if (typeof dto.completed !== 'boolean')
+      throw new BadRequestException('Checkbox progress requires completed');
+    return { completed: dto.completed };
+  }
+
   async getLogs(habitId: string, user: User, getLogsDto: GetLogsDto) {
     const month = calendarMonthBounds(new Date(), user.timeZone ?? 'UTC');
     const startDate =
@@ -494,6 +637,7 @@ export class HabitsService {
           date: 1,
           completed: 1,
           amount: 1,
+          note: { $ifNull: ['$note', '$$REMOVE'] },
           configurationSnapshot: 1,
         },
       },

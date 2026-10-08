@@ -30,6 +30,7 @@ describe('HabitLog measured schema (no DB)', () => {
   it('preserves missing optional fields on legacy records', async () => {
     const row = fixture();
     await expect(row.validate()).resolves.toBeUndefined();
+    expect(row.toObject()).not.toHaveProperty('note');
     expect(row.toObject()).not.toHaveProperty('amount');
     expect(row.toObject()).not.toHaveProperty('configurationSnapshot');
   });
@@ -87,6 +88,22 @@ describe('HabitLog measured schema (no DB)', () => {
       fixture({ configurationSnapshot }).validate(),
     ).rejects.toThrow();
   });
+
+  it.each(['Context', 'x'.repeat(2000)])(
+    'persists an optional trimmed note %s',
+    async (note) => {
+      const row = fixture({ note });
+      await expect(row.validate()).resolves.toBeUndefined();
+      expect(row.toObject().note).toBe(note);
+    },
+  );
+
+  it.each([null, 4, false, [], {}, '', '  ', ' Context ', 'x'.repeat(2001)])(
+    'rejects unnormalized notes without coercion %j',
+    async (note) => {
+      await expect(fixture({ note }).validate()).rejects.toThrow();
+    },
+  );
 
   it('marks the snapshot immutable and prevents replacement on hydrated rows', () => {
     expect(HabitLogSchema.path('configurationSnapshot').options.immutable).toBe(

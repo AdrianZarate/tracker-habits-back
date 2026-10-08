@@ -50,6 +50,17 @@ export class HabitLog extends Document {
   })
   amount?: number;
 
+  // No default or casting: legacy records keep this field absent.
+  @Prop({
+    type: MongooseSchema.Types.Mixed,
+    validate: (value: unknown) =>
+      typeof value === 'string' &&
+      value === value.trim() &&
+      value.length > 0 &&
+      value.length <= 2000,
+  })
+  note?: string;
+
   // No default/backfill. The service sets this only via $setOnInsert.
   @Prop({
     type: MongooseSchema.Types.Mixed,

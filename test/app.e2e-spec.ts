@@ -180,7 +180,11 @@ describe('Isolated HTTP security and habit contracts', () => {
         row = { _id: id(30), ...filter, ...(update.$setOnInsert as Row) };
         logs.push(row);
       }
-      if (row) Object.assign(row, update.$set);
+      if (row) {
+        Object.assign(row, update.$set);
+        for (const key of Object.keys((update.$unset as Row) ?? {}))
+          delete row[key];
+      }
       return executable(row ?? null);
     }),
     deleteOne: jest.fn((filter: Row) => {
@@ -207,6 +211,7 @@ describe('Isolated HTTP security and habit contracts', () => {
               date: row.date,
               completed: row.completed,
               ...(row.amount !== undefined ? { amount: row.amount } : {}),
+              ...(row.note !== undefined ? { note: row.note } : {}),
               ...(row.configurationSnapshot !== undefined
                 ? { configurationSnapshot: row.configurationSnapshot }
                 : {}),
@@ -629,6 +634,211 @@ describe('Isolated HTTP security and habit contracts', () => {
     expect(logModel.find).toHaveBeenCalledWith(
       range(inactive, '2024-02-29', '2024-02-29'),
     );
+  });
+
+  describe('historical record corrections', () => {
+    const correction = (habit = owned, day = '2025-03-31') =>
+      path(habit, `/logs/${day}`);
+    const snapshot = {
+      revisionId: id(40).toHexString(),
+      effectiveFrom: '2025-03-01',
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      },
+    };
+    const correctedWithoutNote = (row: Row) => {
+      const copy = { ...row };
+      delete copy.note;
+      return copy;
+    };
+
+    it('corrects using the original goal and preserves it through notes-only edits and reloads', async () => {
+      Object.assign(logs[1], {
+        amount: 25,
+        configurationSnapshot: snapshot,
+      });
+      associations[0].configurationRevisions = [
+        {
+          ...snapshot,
+          configuration: {
+            ...snapshot.configuration,
+            goal: { kind: 'quantity', target: 5, unit: 'pages' },
+          },
+        },
+      ];
+      const response = await send('patch', correction())
+        .send({ amount: 15, note: '  Revised total  ' })
+        .expect(200);
+      expect(response.body).toMatchObject({
+        amount: 15,
+        completed: false,
+        note: 'Revised total',
+        configurationSnapshot: snapshot,
+      });
+      const corrected = response.body as Row;
+      associations[0].active = false;
+      const noted = await send('patch', correction())
+        .send({ note: '  Context only  ' })
+        .expect(200);
+      expect(noted.body).toEqual({ ...corrected, note: 'Context only' });
+      const history = await send('get', path(owned, '/logs')).expect(200);
+      expect(history.body).toContainEqual({
+        ...corrected,
+        note: 'Context only',
+      });
+      const all = await send('get', '/habits/logs').expect(200);
+      expect(all.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            note: 'Context only',
+            amount: 15,
+            completed: false,
+          }),
+        ]),
+      );
+      await send('patch', correction()).send({ note: '  ' }).expect(200);
+      expect(logs[1]).not.toHaveProperty('note');
+      const cleared = await send('get', path(owned, '/logs')).expect(200);
+      expect(cleared.body).toContainEqual(correctedWithoutNote(corrected));
+      const clearedAll = await send('get', '/habits/logs').expect(200);
+      expect((clearedAll.body as Row[]).every((row) => !('note' in row))).toBe(
+        true,
+      );
+    });
+
+    it.each([true, false])(
+      'inserts explicit past checkbox progress %s with an original snapshot',
+      async (completed) => {
+        const response = await send('patch', correction(owned, '2024-02-29'))
+          .send({ completed, note: ' Leap day ' })
+          .expect(200);
+        expect(response.body).toMatchObject({
+          date: anchor('2024-02-29').toISOString(),
+          completed,
+          note: 'Leap day',
+          configurationSnapshot: {
+            configuration: {
+              schedule: { kind: 'daily' },
+              goal: { kind: 'checkbox' },
+            },
+          },
+        });
+      },
+    );
+
+    it('requires active ownership and explicit progress for a missing record', async () => {
+      await send('patch', correction()).send({ completed: false }).expect(200);
+      expect(logs[1].completed).toBe(false);
+      await send('patch', correction(owned, '2025-03-02'))
+        .send({ note: 'No record' })
+        .expect(400);
+      await send('patch', correction(inactive, '2025-03-02'))
+        .send({ completed: true })
+        .expect(404);
+      await send('patch', correction(inactive, '2024-02-29'))
+        .send({ completed: false })
+        .expect(200);
+      const absent = await send('patch', correction(missing))
+        .send({ completed: false })
+        .expect(404);
+      const nonowner = await send('patch', correction(foreign))
+        .send({ completed: false })
+        .expect(404);
+      expect(nonowner.body).toEqual(absent.body);
+      expect(logs[3].completed).toBe(true);
+    });
+
+    it('inserts scheduled past quantities and corrects snapshotless legacy gaps without backfill', async () => {
+      const scheduled = {
+        ...snapshot,
+        configuration: {
+          ...snapshot.configuration,
+          schedule: { kind: 'weekdays', days: [7] },
+        },
+      };
+      associations[0].configurationRevisions = [scheduled];
+      const before = json(logs);
+      await send('patch', correction(owned, '2025-03-29'))
+        .send({ amount: 20 })
+        .expect(400);
+      expect(json(logs)).toEqual(before);
+      const inserted = await send('patch', correction(owned, '2025-03-30'))
+        .send({ amount: 20 })
+        .expect(200);
+      expect(inserted.body).toMatchObject({
+        amount: 20,
+        completed: true,
+        configurationSnapshot: scheduled,
+      });
+      const legacy = await send('patch', correction())
+        .send({ note: 'No inferred amount' })
+        .expect(200);
+      expect(legacy.body).not.toHaveProperty('amount');
+      const corrected = await send('patch', correction())
+        .send({ amount: 15 })
+        .expect(200);
+      expect(corrected.body).toMatchObject({ amount: 15, completed: false });
+      expect(corrected.body).not.toHaveProperty('configurationSnapshot');
+    });
+
+    it('keeps notes through bodyless completion and returns 409 for a lost original identity', async () => {
+      await send('patch', correction()).send({ note: 'Keep' }).expect(200);
+      const response = await send('post', path(owned, '/complete')).expect(201);
+      expect(response.body).toMatchObject({ note: 'Keep', completed: true });
+      logModel.findOneAndUpdate.mockReturnValueOnce(executable(null));
+      await send('patch', correction()).send({ completed: false }).expect(409);
+      expect(logs[1]).toMatchObject({ note: 'Keep', completed: true });
+    });
+
+    it('rejects unauthenticated corrections and malformed habit IDs', async () => {
+      await request(app.getHttpServer())
+        .patch(correction())
+        .send({ completed: false })
+        .expect(401);
+      await send('patch', '/habits/bad/logs/2025-03-31')
+        .send({ completed: false })
+        .expect(400);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      '2025-02-29',
+      '2024-04-31',
+      '0000-01-01',
+      '2025-3-01',
+      'oops',
+      '2025-04-01',
+      '2025-03-31T00:00:00Z',
+    ])('rejects invalid or account-future calendar label %s', async (day) => {
+      await send('patch', correction(owned, day))
+        .send({ completed: false })
+        .expect(400);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {},
+      { note: null },
+      { note: 4 },
+      { note: 'x'.repeat(2001) },
+      { amount: null },
+      { amount: '4' },
+      { amount: -1 },
+      { amount: 1e9 + 1 },
+      { completed: null },
+      { completed: 'false' },
+      { completed: 0 },
+      { userId: other.toHexString() },
+      { note: 'Valid', extra: true },
+      { configurationSnapshot: snapshot },
+      { amount: 1 },
+    ])('rejects malformed/unsupported correction %j', async (body) => {
+      const before = json(logs);
+      await send('patch', correction()).send(body).expect(400);
+      expect(json(logs)).toEqual(before);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
   });
 
   it('returns no foreign history, even with explicit dates', async () => {

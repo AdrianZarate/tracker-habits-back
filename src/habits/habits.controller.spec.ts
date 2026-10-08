@@ -10,6 +10,7 @@ import { User, UserSchema } from '../auth/entities/user.entity';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
+import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { HabitsController } from './habits.controller';
 import { HabitsService } from './habits.service';
@@ -48,6 +49,7 @@ describe('Personal definition controller plumbing', () => {
   const service = {
     create: jest.fn(),
     complete: jest.fn(),
+    updateLog: jest.fn(),
     update: jest.fn(),
     updateDefinition: jest.fn(),
   };
@@ -182,6 +184,55 @@ describe('Personal definition controller plumbing', () => {
         { type: 'body', metatype: CompleteHabitDto },
       ),
     ).rejects.toThrow();
+  });
+
+  it('exposes the owner-authenticated correction PATCH with date, Mongo-ID pipe and concrete DTO', async () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      HabitsController.prototype,
+      'updateLog',
+    )!.value as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      ':habitId/logs/:date',
+    );
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.PATCH,
+    );
+    expect(
+      Reflect.getMetadata(
+        'design:paramtypes',
+        HabitsController.prototype,
+        'updateLog',
+      ),
+    ).toEqual([String, String, UpdateHabitLogDto, User]);
+    const args = Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      HabitsController,
+      'updateLog',
+    ) as Record<string, { index: number; data?: string; pipes: unknown[] }>;
+    expect(Object.values(args)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          index: 0,
+          data: 'habitId',
+          pipes: [ParseMongoIdPipe],
+        }),
+        expect.objectContaining({ index: 1, data: 'date' }),
+        expect.objectContaining({ index: 2 }),
+        expect.objectContaining({ index: 3 }),
+      ]),
+    );
+    const dto = (await pipe.transform(
+      { completed: false, note: '  Past  ' },
+      { type: 'body', metatype: UpdateHabitLogDto },
+    )) as UpdateHabitLogDto;
+    await controller.updateLog(habitId, '2024-02-29', dto, user);
+    expect(service.updateLog).toHaveBeenCalledWith(
+      habitId,
+      '2024-02-29',
+      { completed: false, note: 'Past' },
+      user,
+    );
+    expect(service.complete).not.toHaveBeenCalled();
   });
 
   it('keeps the original empty PATCH as deactivation', async () => {

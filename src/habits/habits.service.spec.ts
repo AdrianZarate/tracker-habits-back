@@ -1,4 +1,9 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
 import { validate } from 'class-validator';
@@ -273,6 +278,7 @@ describe('Owner-scoped habit calendar operations', () => {
             date: 1,
             completed: 1,
             amount: 1,
+            note: { $ifNull: ['$note', '$$REMOVE'] },
             configurationSnapshot: 1,
           },
         },
@@ -992,6 +998,494 @@ describe('Owner-scoped habit calendar operations', () => {
       });
       await expect(write({ amount: 1 })).rejects.toBe(error);
       expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('historical corrections and notes', () => {
+    const snapshot: ConfigurationRevision = {
+      revisionId: '000000000000000000000010',
+      effectiveFrom: '2024-01-01',
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      },
+    };
+    const checkbox: ConfigurationRevision = {
+      ...snapshot,
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'checkbox' },
+      },
+    };
+    let stored: Record<string, unknown> | null;
+    const configure = (revisions = [snapshot], active = true) =>
+      association.findOne.mockReturnValue(
+        query({ active, habitId, configurationRevisions: revisions }),
+      );
+    const correct = (body: unknown, day = '2025-03-31', user = account()) =>
+      service.updateLog(id, day, body as UpdateHabitLogDto, user);
+    const existing = (fields: object = {}) => {
+      stored = {
+        _id: otherId,
+        userId: ownerId,
+        habitId,
+        date: anchor('2025-03-31'),
+        completed: true,
+        ...fields,
+      };
+    };
+
+    beforeEach(() => {
+      stored = null;
+      configure();
+      logs.findOne.mockImplementation(
+        (filter: {
+          date: Date;
+          userId: Types.ObjectId;
+          habitId: Types.ObjectId;
+        }) =>
+          query(
+            stored &&
+              filter.date.getTime() === (stored.date as Date).getTime() &&
+              filter.userId.equals(stored.userId as Types.ObjectId) &&
+              filter.habitId.equals(stored.habitId as Types.ObjectId)
+              ? { ...stored }
+              : null,
+          ),
+      );
+      logs.findOneAndUpdate.mockImplementation(
+        (
+          filter: { _id?: Types.ObjectId },
+          update: { $setOnInsert?: object; $set?: object; $unset?: object },
+          options: { upsert?: boolean },
+        ) => {
+          if (!stored && options.upsert)
+            stored = { _id: otherId, ...filter, ...update.$setOnInsert };
+          if (
+            !stored ||
+            (filter._id && !filter._id.equals(stored._id as Types.ObjectId))
+          )
+            return executableQuery(null);
+          Object.assign(stored, update.$set);
+          for (const key of Object.keys(update.$unset ?? {}))
+            delete stored[key];
+          return executableQuery({ ...stored });
+        },
+      );
+    });
+
+    it('replaces incorrect totals against the stored original goal, not newer definitions', async () => {
+      existing({ amount: 99, configurationSnapshot: snapshot, note: 'Keep' });
+      configure([
+        {
+          ...snapshot,
+          effectiveFrom: '2025-03-01',
+          configuration: {
+            ...snapshot.configuration,
+            goal: { kind: 'quantity', target: 5, unit: 'pages' },
+          },
+        },
+      ]);
+      for (const [amount, completed] of [
+        [15, false],
+        [20, true],
+        [0, false],
+        [1e9, true],
+      ]) {
+        expect(await correct({ amount })).toMatchObject({
+          amount,
+          completed,
+          note: 'Keep',
+          configurationSnapshot: snapshot,
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          {
+            userId: ownerId,
+            habitId,
+            date: anchor('2025-03-31'),
+            _id: otherId,
+          },
+          { $set: { amount, completed } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      }
+    });
+
+    it.each([true, false])(
+      'preserves checkbox completion %s and legacy gaps in notes-only edits',
+      async (completed) => {
+        existing({ completed });
+        const original = { ...stored };
+        configure([snapshot], false);
+        expect(await correct({ note: '  Context  ' })).toEqual({
+          ...original,
+          note: 'Context',
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ _id: otherId }),
+          { $set: { note: 'Context' } },
+          { returnDocument: 'after', runValidators: true },
+        );
+        expect(stored).not.toHaveProperty('amount');
+        expect(stored).not.toHaveProperty('configurationSnapshot');
+        expect(await correct({ note: '  ' })).toEqual(original);
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ _id: otherId }),
+          { $unset: { note: 1 } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      },
+    );
+
+    it('notes-only preserves measured progress and the immutable original snapshot even when inconsistent', async () => {
+      existing({ amount: 2, completed: true, configurationSnapshot: snapshot });
+      configure([checkbox], false);
+      const original = { ...stored };
+      expect(await correct({ note: 'Observed' })).toEqual({
+        ...original,
+        note: 'Observed',
+      });
+    });
+
+    it('uses date-effective fallback on legacy quantities without inventing amounts or backfilling snapshots', async () => {
+      const recent = {
+        ...snapshot,
+        effectiveFrom: '2025-04-01',
+        configuration: {
+          ...snapshot.configuration,
+          goal: { kind: 'quantity' as const, target: 5, unit: 'pages' },
+        },
+      };
+      configure([snapshot, recent]);
+      existing();
+      expect(await correct({ note: 'Legacy gap' })).not.toHaveProperty(
+        'amount',
+      );
+      expect(await correct({ amount: 15 })).toMatchObject({
+        amount: 15,
+        completed: false,
+      });
+      expect(stored).not.toHaveProperty('configurationSnapshot');
+      existing({ date: anchor('2023-12-31') });
+      expect(await correct({ completed: false }, '2023-12-31')).toMatchObject({
+        completed: false,
+      });
+      expect(stored).not.toHaveProperty('amount');
+      expect(stored).not.toHaveProperty('configurationSnapshot');
+    });
+
+    it('inserts past quantities using the date-effective goal and UTC label anchor', async () => {
+      configure([snapshot, { ...checkbox, effectiveFrom: '2025-04-01' }]);
+      expect(
+        await correct({ amount: 15, note: '  Past  ' }, '2024-02-29'),
+      ).toMatchObject({
+        date: anchor('2024-02-29'),
+        amount: 15,
+        completed: false,
+        note: 'Past',
+        configurationSnapshot: snapshot,
+      });
+      expect(logs.findOneAndUpdate).toHaveBeenNthCalledWith(
+        1,
+        { userId: ownerId, habitId, date: anchor('2024-02-29') },
+        {
+          $setOnInsert: {
+            amount: 15,
+            completed: false,
+            note: 'Past',
+            configurationSnapshot: snapshot,
+          },
+        },
+        { upsert: true, returnDocument: 'after', runValidators: true },
+      );
+    });
+
+    it.each([true, false])(
+      'allows explicit checkbox %s on new or inactive existing records',
+      async (completed) => {
+        configure([checkbox]);
+        expect(await correct({ completed })).toMatchObject({
+          completed,
+          configurationSnapshot: checkbox,
+        });
+        configure([snapshot], false);
+        expect(await correct({ completed: !completed })).toMatchObject({
+          completed: !completed,
+          configurationSnapshot: checkbox,
+        });
+        expect(stored).not.toHaveProperty('amount');
+      },
+    );
+
+    it.each([true, false])(
+      'requires progress on new records (quantity=%s)',
+      async (quantity) => {
+        configure([quantity ? snapshot : checkbox]);
+        await expect(correct({ note: 'No progress' })).rejects.toBeInstanceOf(
+          BadRequestException,
+        );
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['missing', 'foreign', 'inactive'])(
+      'denies new records for %s associations',
+      async (scenario) => {
+        association.findOne.mockImplementation(
+          (filter: { userId: Types.ObjectId; habitId: Types.ObjectId }) => {
+            const row = {
+              userId: scenario === 'foreign' ? otherId : ownerId,
+              habitId,
+              active: false,
+            };
+            return query(
+              scenario !== 'missing' &&
+                row.userId.equals(filter.userId) &&
+                row.habitId.equals(filter.habitId)
+                ? row
+                : null,
+            );
+          },
+        );
+        await expect(correct({ completed: false })).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        expect(association.findOne).toHaveBeenCalledWith({
+          userId: ownerId,
+          habitId,
+        });
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not correct foreign history even if a log double supplies a foreign row', async () => {
+      existing();
+      association.findOne.mockReturnValue(query(null));
+      await expect(correct({ note: 'Private' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(logs.findOne).not.toHaveBeenCalled();
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('enforces selected weekdays only for new history, ignoring current schedules for existing rows', async () => {
+      const scheduled = {
+        ...snapshot,
+        configuration: {
+          ...snapshot.configuration,
+          schedule: { kind: 'weekdays' as const, days: [7] },
+        },
+      };
+      configure([scheduled]);
+      await expect(correct({ amount: 20 })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(await correct({ amount: 20 }, '2025-03-30')).toMatchObject({
+        completed: true,
+        configurationSnapshot: scheduled,
+      });
+      existing({ configurationSnapshot: scheduled });
+      configure([checkbox], false);
+      expect(await correct({ amount: 0 })).toMatchObject({
+        completed: false,
+        configurationSnapshot: scheduled,
+      });
+    });
+
+    it.each([
+      ['Asia/Tokyo', '2025-03-31T16:00:00Z', '2025-04-01'],
+      ['America/Los_Angeles', '2025-04-01T00:30:00Z', '2025-03-31'],
+      ['America/New_York', '2025-03-09T07:30:00Z', '2025-03-09'],
+      [undefined, '2025-04-01T00:30:00Z', '2025-04-01'],
+    ])(
+      'accepts today in %s without shifting stored date labels',
+      async (zone, instant, day) => {
+        jest.setSystemTime(new Date(instant));
+        configure([checkbox]);
+        expect(
+          await correct({ completed: false }, day, account(zone)),
+        ).toMatchObject({ date: anchor(day), completed: false });
+      },
+    );
+
+    it.each([
+      '2025-02-29',
+      '2024-04-31',
+      '0000-01-01',
+      '2025-13-01',
+      '2025-3-31',
+      '',
+      '2025-03-31T00:00:00Z',
+      '2025-04-01',
+    ])('rejects invalid/account-future date %s before reads', async (day) => {
+      await expect(
+        correct({ amount: 1 }, day, account('America/Los_Angeles')),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(association.findOne).not.toHaveBeenCalled();
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      null,
+      [],
+      'bad',
+      {},
+      { note: null },
+      { note: 2 },
+      { note: 'x'.repeat(2001) },
+      { completed: null },
+      { completed: 'false' },
+      { amount: null },
+      { amount: '1' },
+      { amount: NaN },
+      { amount: Infinity },
+      { amount: -1 },
+      { amount: 1e9 + 1 },
+      { amount: undefined },
+      { userId: ownerId },
+      { note: 'Valid', extra: true },
+    ])('rejects malformed direct-call payload %j', async (body) => {
+      await expect(correct(body)).rejects.toBeInstanceOf(BadRequestException);
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])(
+      'rejects goal-incompatible progress without touching records (quantity=%s)',
+      async (quantity) => {
+        configure([quantity ? snapshot : checkbox]);
+        existing({ configurationSnapshot: quantity ? snapshot : checkbox });
+        const before = { ...stored };
+        for (const body of quantity
+          ? [{ completed: false }, { amount: 1, completed: true }]
+          : [{ amount: 0 }, { amount: 1, completed: false }]) {
+          await expect(correct(body)).rejects.toBeInstanceOf(
+            BadRequestException,
+          );
+          expect(stored).toEqual(before);
+        }
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([false, true])(
+      're-evaluates the concurrent winner original goal (duplicate=%s)',
+      async (duplicate) => {
+        const winner = {
+          ...snapshot,
+          configuration: {
+            ...snapshot.configuration,
+            goal: { kind: 'quantity' as const, target: 50, unit: 'pages' },
+          },
+        };
+        logs.findOneAndUpdate.mockImplementationOnce(() => {
+          existing({
+            amount: 1,
+            completed: false,
+            note: 'Other writer',
+            configurationSnapshot: winner,
+          });
+          const error = Object.assign(new Error('duplicate'), { code: 11000 });
+          return duplicate
+            ? { lean: () => ({ exec: () => Promise.reject(error) }) }
+            : executableQuery({ ...stored });
+        });
+        expect(await correct({ amount: 20 })).toMatchObject({
+          amount: 20,
+          completed: false,
+          note: 'Other writer',
+          configurationSnapshot: winner,
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ _id: otherId }),
+          { $set: { amount: 20, completed: false } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      },
+    );
+
+    it('rejects a competing checkbox winner without overwriting any fields', async () => {
+      logs.findOneAndUpdate.mockImplementationOnce(() => {
+        existing({ configurationSnapshot: checkbox });
+        return executableQuery({ ...stored });
+      });
+      await expect(
+        correct({ amount: 20, note: 'Do not write' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      expect(stored).not.toHaveProperty('note');
+    });
+
+    it.each([false, true])(
+      'returns 409 rather than updating a concurrent undo/reinsert (reinsert=%s)',
+      async (reinsert) => {
+        existing({ amount: 10, configurationSnapshot: snapshot });
+        logs.findOneAndUpdate.mockImplementationOnce(
+          (filter: { _id: Types.ObjectId }) => {
+            expect(filter._id).toEqual(otherId);
+            stored = reinsert
+              ? {
+                  _id: new Types.ObjectId(),
+                  amount: 99,
+                  completed: true,
+                  note: 'New identity',
+                }
+              : null;
+            return executableQuery(null);
+          },
+        );
+        await expect(
+          correct({ amount: 0, note: 'Stale correction' }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(stored?.note).toBe(reinsert ? 'New identity' : undefined);
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([false, true])(
+      'returns 409 on a null insertion result or vanished duplicate winner (duplicate=%s)',
+      async (duplicate) => {
+        const error = Object.assign(new Error('duplicate'), { code: 11000 });
+        logs.findOneAndUpdate.mockReturnValueOnce(
+          duplicate
+            ? { lean: () => ({ exec: () => Promise.reject(error) }) }
+            : executableQuery(null),
+        );
+        await expect(correct({ amount: 1 })).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('propagates non-duplicate failures without a retry', async () => {
+      const error = new Error('synthetic write failure');
+      logs.findOneAndUpdate.mockReturnValueOnce({
+        lean: () => ({ exec: () => Promise.reject(error) }),
+      });
+      await expect(correct({ amount: 1 })).rejects.toBe(error);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('captures account today before awaited reads', async () => {
+      association.findOne.mockImplementation(() => {
+        jest.setSystemTime(new Date('2025-03-31T00:30:00Z'));
+        return query({
+          habitId,
+          active: true,
+          configurationRevisions: [checkbox],
+        });
+      });
+      expect(await correct({ completed: true }, '2025-04-01')).toMatchObject({
+        date: anchor('2025-04-01'),
+      });
+    });
+
+    it('per-habit reads expose stored notes and omit absent notes without filling legacy fields', async () => {
+      const rows = [{ completed: false, note: 'Stored' }, { completed: true }];
+      logs.find.mockReturnValue(executableQuery(rows));
+      expect(await service.getLogs(id, account(), {})).toEqual(rows);
+      expect(rows[1]).not.toHaveProperty('note');
     });
   });
 
