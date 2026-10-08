@@ -10,6 +10,7 @@ import { User, UserSchema } from '../auth/entities/user.entity';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
+import { GetHabitWeekDto } from './dto/get-habit-week.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { HabitsController } from './habits.controller';
@@ -50,6 +51,7 @@ describe('Personal definition controller plumbing', () => {
     create: jest.fn(),
     complete: jest.fn(),
     updateLog: jest.fn(),
+    getWeek: jest.fn(),
     update: jest.fn(),
     updateDefinition: jest.fn(),
   };
@@ -233,6 +235,52 @@ describe('Personal definition controller plumbing', () => {
       user,
     );
     expect(service.complete).not.toHaveBeenCalled();
+  });
+
+  it('exposes GET week with concrete query DTO, Mongo-ID pipe and authenticated forwarding', async () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      HabitsController.prototype,
+      'getWeek',
+    )!.value as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(':habitId/week');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
+    );
+    expect(
+      Reflect.getMetadata(
+        'design:paramtypes',
+        HabitsController.prototype,
+        'getWeek',
+      ),
+    ).toEqual([String, GetHabitWeekDto, User]);
+    const args = Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      HabitsController,
+      'getWeek',
+    ) as Record<string, { index: number; data?: string; pipes: unknown[] }>;
+    expect(Object.values(args)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          index: 0,
+          data: 'habitId',
+          pipes: [ParseMongoIdPipe],
+        }),
+        expect.objectContaining({ index: 1 }),
+        expect.objectContaining({ index: 2 }),
+      ]),
+    );
+    const dto = (await pipe.transform(
+      { date: '2024-02-29' },
+      { type: 'query', metatype: GetHabitWeekDto },
+    )) as GetHabitWeekDto;
+    const response = { date: dto.date, days: [] };
+    service.getWeek.mockResolvedValue(response);
+    expect(await controller.getWeek(habitId, dto, user)).toBe(response);
+    expect(service.getWeek).toHaveBeenCalledWith(habitId, user, {
+      date: '2024-02-29',
+    });
+    await controller.getWeek(habitId, {}, user);
+    expect(service.getWeek).toHaveBeenLastCalledWith(habitId, user, {});
   });
 
   it('keeps the original empty PATCH as deactivation', async () => {

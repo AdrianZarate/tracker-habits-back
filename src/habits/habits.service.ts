@@ -21,6 +21,8 @@ import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { GetHabitWeekDto } from './dto/get-habit-week.dto';
+import { isoWeekDates, scheduledOnDate } from './configuration/habit-week';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
 import {
@@ -534,6 +536,76 @@ export class HabitsService {
     if (typeof dto.completed !== 'boolean')
       throw new BadRequestException('Checkbox progress requires completed');
     return { completed: dto.completed };
+  }
+
+  async getWeek(habitId: string, user: User, dto: GetHabitWeekDto = {}) {
+    const date =
+      dto.date === undefined
+        ? calendarDay(new Date(), user.timeZone ?? 'UTC')
+        : dto.date;
+    let labels: string[];
+    try {
+      if (typeof date !== 'string') throw new RangeError('Invalid date type');
+      labels = isoWeekDates(date);
+    } catch {
+      throw new BadRequestException(
+        'Expected a valid YYYY-MM-DD with a full supported ISO week',
+      );
+    }
+    const filter = { userId: user._id, habitId: new Types.ObjectId(habitId) };
+    const association = await this.habitUserModel.findOne(filter).lean();
+    if (!association)
+      throw new NotFoundException('Habit not found for this user');
+    const weekStart = labels[0];
+    const weekEnd = labels[6];
+    const logs = await this.habitLogModel
+      .find({
+        ...filter,
+        date: {
+          $gte: dayLabelToUtcAnchor(weekStart),
+          $lte: dayLabelToUtcAnchor(weekEnd),
+        },
+      })
+      .lean()
+      .exec();
+    // The unique owner/habit/date index permits one stored authority per label.
+    const byDate = new Map(
+      logs.map((log) => [log.date.toISOString().slice(0, 10), log]),
+    );
+    const days = labels.map((day) => {
+      const log = byDate.get(day);
+      const configurationSnapshot =
+        log?.configurationSnapshot ??
+        resolveConfigurationForDate(association.configurationRevisions, day);
+      return {
+        date: day,
+        scheduled: scheduledOnDate(day, configurationSnapshot.configuration),
+        completed: log?.completed ?? false,
+        ...(log?.amount !== undefined ? { amount: log.amount } : {}),
+        ...(log?.note !== undefined ? { note: log.note } : {}),
+        configurationSnapshot,
+      };
+    });
+    const selected = days[labels.indexOf(date)];
+    const configuration = selected.configurationSnapshot.configuration;
+    const completedDays = days.filter((day) => day.completed === true).length;
+    return {
+      habitId: filter.habitId,
+      date,
+      weekStart,
+      weekEnd,
+      configuration,
+      scheduledOnDate: selected.scheduled,
+      completedDays,
+      ...(configuration.schedule.kind === 'weekly'
+        ? {
+            weeklyTarget: configuration.schedule.timesPerWeek,
+            weeklyCompleted:
+              completedDays >= configuration.schedule.timesPerWeek,
+          }
+        : {}),
+      days,
+    };
   }
 
   async getLogs(habitId: string, user: User, getLogsDto: GetLogsDto) {

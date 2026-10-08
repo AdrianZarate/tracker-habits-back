@@ -14,6 +14,7 @@ import { CreateHabitDto } from './dto/create-habit.dto';
 import { CompleteHabitDto } from './dto/complete-habit.dto';
 import { UpdateHabitLogDto } from './dto/update-habit-log.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { GetHabitWeekDto } from './dto/get-habit-week.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
 import { User } from 'src/auth/entities/user.entity';
@@ -97,6 +98,18 @@ export class HabitsController {
     @GetUser() user: User,
   ) {
     return this.habitsService.updateLog(habitId, date, dto, user);
+  }
+
+  @Get(':habitId/week')
+  @ApiOperation({
+    summary: 'Leer la semana ISO y el objetivo de la fecha seleccionada',
+  })
+  getWeek(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Query() dto: GetHabitWeekDto,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.getWeek(habitId, user, dto);
   }
 
   @Get(':habitId/logs')

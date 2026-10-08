@@ -203,17 +203,79 @@ Both `GET /habits/:habitId/logs` and `GET /habits/logs` expose `note` only when
 stored. Bodyless completion remains compatible and does not edit notes; current-
 day undo still deletes the whole current-day record.
 
+## Read a week's progress
+
+Use `GET /habits/:habitId/week?date=2025-03-31`. Omit `date` to select today in
+the authenticated account's timezone (UTC by default). The optional query accepts
+only real `YYYY-MM-DD` labels, not null, timestamps, repeated values or extra keys.
+A full ISO Monday–Sunday week must fit within years 0001–9999; overflow returns
+400 rather than a partial week. Future labels are readable. Inactive owned habits
+remain readable; missing and foreign associations return the same 404.
+
+The response contract is:
+
+```typescript
+{
+  habitId: string;
+  date: string;                  // Selected account-date label
+  weekStart: string;             // Monday, inclusive
+  weekEnd: string;               // Sunday, inclusive
+  configuration: HabitConfiguration; // Original selected-day goal/schedule
+  scheduledOnDate: boolean;
+  completedDays: number;
+  weeklyTarget?: number;        // Selected date's weekly quota only
+  weeklyCompleted?: boolean;    // completedDays >= weeklyTarget
+  days: Array<{
+    date: string;               // Seven ascending labels, Monday–Sunday
+    scheduled: boolean;
+    completed: boolean;
+    amount?: number;
+    note?: string;
+    configurationSnapshot: {
+      configuration: HabitConfiguration;
+      revisionId?: string;
+      effectiveFrom?: string;
+    };
+  }>;
+}
+```
+
+Each recorded day's original snapshot wins. Snapshotless legacy records and
+empty days use the definition effective on that date (daily checkbox before the
+first revision). The selected day's resolved snapshot supplies the top-level
+`configuration` as well. These fallback snapshots are **response-only**, never
+backfilled into storage. Stored completion booleans are authoritative even when
+an amount disagrees with the goal; missing amounts are not invented. Optional
+amount/note fields appear only when stored, including zero amounts.
+
+`scheduled` uses each day's own configuration: daily and weekly allow every day;
+selected weekdays match ISO Monday=1 through Sunday=7. A stored completed record
+still counts even on a nonselected day. Empty days are incomplete.
+`completedDays` counts unique stored completed dates in the seven-day range,
+using the existing unique owner/habit/date index; quantities with different units
+are never summed. `weeklyTarget` and `weeklyCompleted` appear **only** when the
+selected day's schedule is weekly. They describe that selected date's quota,
+not a recalculation of all historical weeks or a rewrite of midweek definitions.
+Selecting a different date in the same week can therefore change the displayed
+quota while leaving completed-day counts and per-day history unchanged.
+
+Dates are account-day labels stored/read as UTC anchors, not local-midnight
+instants. Week arithmetic uses calendar fields, never elapsed 24-hour durations
+across DST. This endpoint performs no database writes and leaves both existing
+log-read response contracts unchanged.
+
 ## Scope and verification
 
-Current-day measured recording, original snapshots, notes and historical
-correction are implemented. Weekly summaries, pause/archive and frontend controls
-remain later work; there is no bulk migration or automatic recalculation of history.
+Current-day measured recording, original snapshots, notes, historical correction
+and weekly reads are implemented. Pause/archive and frontend controls remain
+later work; there is no bulk migration or automatic recalculation of history.
 
 Deterministic helper, schema, service, DTO, controller and synthetic HTTP tests
 cover strict validation, dates/timezones/DST, original goals, pending changes,
 replacement totals, thresholds, schedules, legacy compatibility, immutable
 snapshots, notes-only preservation, historical corrections, legacy quantity gaps,
-owner/activity checks and undo/reinsert conflicts. Concurrent-winner and duplicate-key tests
+owner/activity checks, undo/reinsert conflicts, ISO weeks/year overflow, selected-date
+quotas and authoritative stored completed-day counts. Concurrent-winner and duplicate-key tests
 inspect Mongo update contracts using doubles, not live MongoDB execution. HTTP
 regressions use synthetic fixtures without a database or private environment
 configuration.

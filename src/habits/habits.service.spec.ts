@@ -96,6 +96,254 @@ describe('Owner-scoped habit calendar operations', () => {
 
   afterEach(() => jest.useRealTimers());
 
+  describe('weekly read model', () => {
+    const checkbox: HabitConfiguration = {
+      schedule: { kind: 'daily' },
+      goal: { kind: 'checkbox' },
+    };
+    const revision = (
+      effectiveFrom: string,
+      configuration: HabitConfiguration,
+    ) => ({
+      revisionId: effectiveFrom,
+      effectiveFrom,
+      configuration,
+    });
+
+    it.each([
+      [
+        'America/Los_Angeles',
+        '2025-04-01T00:30:00Z',
+        '2025-03-31',
+        '2025-03-31',
+        '2025-04-06',
+      ],
+      ['UTC', '2025-04-01T00:30:00Z', '2025-04-01', '2025-03-31', '2025-04-06'],
+      [
+        'America/Los_Angeles',
+        '2025-03-10T00:30:00Z',
+        '2025-03-09',
+        '2025-03-03',
+        '2025-03-09',
+      ],
+      [
+        'America/Los_Angeles',
+        '2025-11-03T00:30:00Z',
+        '2025-11-02',
+        '2025-10-27',
+        '2025-11-02',
+      ],
+      [
+        'Asia/Tokyo',
+        '2020-12-31T23:30:00Z',
+        '2021-01-01',
+        '2020-12-28',
+        '2021-01-03',
+      ],
+    ])(
+      'defaults to one account day for %s at %s',
+      async (zone, instant, date, weekStart, weekEnd) => {
+        jest.setSystemTime(new Date(instant));
+        const result = await service.getWeek(id, account(zone));
+        expect(result).toMatchObject({
+          habitId,
+          date,
+          weekStart,
+          weekEnd,
+          completedDays: 0,
+          configuration: checkbox,
+        });
+        expect(result.days).toHaveLength(7);
+        expect(logs.find).toHaveBeenCalledWith({
+          userId: ownerId,
+          habitId,
+          date: { $gte: anchor(weekStart), $lte: anchor(weekEnd) },
+        });
+      },
+    );
+
+    it.each([true, false])(
+      'reads active=%s without mutation or optional-field invention',
+      async (active) => {
+        association.findOne.mockReturnValue(query({ active, habitId }));
+        logs.find.mockReturnValue(
+          executableQuery([
+            { date: anchor('2025-03-31'), completed: true },
+            { date: anchor('2025-04-01'), completed: false, note: '' },
+          ]),
+        );
+        const result = await service.getWeek(id, account(), {
+          date: '2025-03-31',
+        });
+        expect(association.findOne).toHaveBeenCalledWith({
+          userId: ownerId,
+          habitId,
+        });
+        expect(result.completedDays).toBe(1);
+        expect(result.days[0]).toEqual({
+          date: '2025-03-31',
+          scheduled: true,
+          completed: true,
+          configurationSnapshot: { configuration: checkbox },
+        });
+        expect(result.days[1]).toHaveProperty('note', '');
+        expect(result.days[2]).not.toHaveProperty('note');
+        expect(result.days.every((day) => !('amount' in day))).toBe(true);
+        expect(result).not.toHaveProperty('weeklyTarget');
+        expect(result).not.toHaveProperty('weeklyCompleted');
+        expect(association.findOneAndUpdate).not.toHaveBeenCalled();
+        expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+        expect(logs.deleteOne).not.toHaveBeenCalled();
+      },
+    );
+
+    it('retains original snapshots/completion across differing goals and midweek schedules', async () => {
+      const old: HabitConfiguration = {
+        schedule: { kind: 'weekdays', days: [7] },
+        goal: { kind: 'quantity', target: 50, unit: 'pages' },
+      };
+      const newer: HabitConfiguration = {
+        schedule: { kind: 'weekdays', days: [2] },
+        goal: { kind: 'quantity', target: 5, unit: 'km' },
+      };
+      const revisions = [
+        revision('2025-04-01', newer),
+        revision('2025-04-03', checkbox),
+      ];
+      association.findOne.mockReturnValue(
+        query({ habitId, configurationRevisions: revisions }),
+      );
+      const stored = [
+        {
+          date: anchor('2025-03-31'),
+          completed: true,
+          amount: 0,
+          note: 'kept',
+          configurationSnapshot: revision('2024-01-01', old),
+        },
+        { date: anchor('2025-04-01'), completed: false, amount: 500 },
+        { date: anchor('2025-04-02'), completed: true },
+      ];
+      const before = JSON.stringify(stored);
+      logs.find.mockReturnValue(executableQuery(stored));
+      const result = await service.getWeek(id, account(), {
+        date: '2025-03-31',
+      });
+      expect(result.configuration).toEqual(old);
+      expect(result.scheduledOnDate).toBe(false);
+      expect(result.completedDays).toBe(2); // Includes recorded nonselected days.
+      expect(result.days.map((day) => day.scheduled)).toEqual([
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+      ]);
+      expect(result.days[0]).toMatchObject({
+        amount: 0,
+        note: 'kept',
+        completed: true,
+        configurationSnapshot: stored[0].configurationSnapshot,
+      });
+      expect(result.days[1]).toMatchObject({
+        completed: false,
+        configurationSnapshot: revisions[0],
+      });
+      expect(result.days[2]).not.toHaveProperty('amount');
+      expect(result.days[3].configurationSnapshot).toEqual(revisions[1]);
+      expect(result).not.toHaveProperty('weeklyTarget');
+      expect(JSON.stringify(stored)).toBe(before);
+      const emptySelected = await service.getWeek(id, account(), {
+        date: '2025-04-03',
+      });
+      expect(emptySelected.configuration).toEqual(checkbox);
+      const legacySelected = await service.getWeek(id, account(), {
+        date: '2025-04-02',
+      });
+      expect(legacySelected.configuration).toEqual(newer);
+      expect(legacySelected.scheduledOnDate).toBe(false);
+    });
+
+    it.each([1, 3, 7])(
+      'uses selected-date quota %s with unique stored completed days',
+      async (target) => {
+        const configuration: HabitConfiguration = {
+          schedule: { kind: 'weekly', timesPerWeek: target },
+          goal: { kind: 'quantity', target: 20, unit: 'pages' },
+        };
+        association.findOne.mockReturnValue(
+          query({
+            habitId,
+            configurationRevisions: [revision('2025-03-31', configuration)],
+          }),
+        );
+        const stored = Array.from({ length: 7 }, (_, offset) => ({
+          date: anchor(offset === 0 ? '2025-03-31' : `2025-04-0${offset}`),
+          completed: offset < target,
+          amount: offset === 0 ? 1000000 : 0,
+        }));
+        logs.find.mockReturnValue(executableQuery(stored));
+        expect(
+          await service.getWeek(id, account(), { date: '2025-03-31' }),
+        ).toMatchObject({
+          completedDays: target,
+          weeklyTarget: target,
+          weeklyCompleted: true,
+        });
+        stored[target - 1].completed = false;
+        expect(
+          await service.getWeek(id, account(), { date: '2025-03-31' }),
+        ).toMatchObject({
+          completedDays: target - 1,
+          weeklyTarget: target,
+          weeklyCompleted: false,
+        });
+      },
+    );
+
+    it.each(['missing', 'foreign'])(
+      'returns equivalent 404 before reading %s logs',
+      async (scenario) => {
+        association.findOne.mockImplementation(
+          (filter: { userId: Types.ObjectId }) =>
+            query(
+              scenario === 'foreign' && filter.userId.equals(otherId)
+                ? { habitId }
+                : null,
+            ),
+        );
+        await expect(service.getWeek(id, account())).rejects.toEqual(
+          new NotFoundException('Habit not found for this user'),
+        );
+        expect(logs.find).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([null, 1, true, [], {}, '2025-02-29', '9999-12-31', '0000-01-01'])(
+      'rejects invalid direct-service date %j before database reads',
+      async (date) => {
+        await expect(
+          service.getWeek(id, account(), { date: date as string }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(association.findOne).not.toHaveBeenCalled();
+        expect(logs.find).not.toHaveBeenCalled();
+      },
+    );
+
+    it('supports year 1 and the final full week of year 9999 without timezone-shifting anchors', async () => {
+      expect(
+        await service.getWeek(id, account('America/Los_Angeles'), {
+          date: '0001-01-01',
+        }),
+      ).toMatchObject({ weekStart: '0001-01-01', weekEnd: '0001-01-07' });
+      expect(
+        await service.getWeek(id, account(), { date: '9999-12-26' }),
+      ).toMatchObject({ weekStart: '9999-12-20', weekEnd: '9999-12-26' });
+    });
+  });
+
   it.each([true, false])(
     'reads an owned habit with active=%s',
     async (active) => {

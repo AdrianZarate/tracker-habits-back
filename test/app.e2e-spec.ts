@@ -308,6 +308,140 @@ describe('Isolated HTTP security and habit contracts', () => {
     }
   });
 
+  it('reads seven account-date labels by default without writes', async () => {
+    const before = json(logs);
+    const response = await send('get', path(owned, '/week')).expect(200);
+    const body = response.body as { date: string; days: Row[] };
+    expect(body).toMatchObject({
+      habitId: owned.toHexString(),
+      date: '2025-03-31',
+      weekStart: '2025-03-31',
+      weekEnd: '2025-04-06',
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'checkbox' },
+      },
+      scheduledOnDate: true,
+      completedDays: 2,
+    });
+    expect(body.days).toHaveLength(7);
+    expect(body.days[0]).toEqual({
+      date: '2025-03-31',
+      scheduled: true,
+      completed: true,
+      configurationSnapshot: {
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      },
+    });
+    expect(body).not.toHaveProperty('weeklyTarget');
+    expect(logModel.find).toHaveBeenCalledWith(
+      range(owned, '2025-03-31', '2025-04-06'),
+    );
+    expect(json(logs)).toEqual(before);
+    expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(associationModel.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(['0001-01-01', '9999-12-26', '2021-01-01'])(
+    'reads supported early/late years and cross-year weeks: %s',
+    async (date) => {
+      const response = await send(
+        'get',
+        path(owned, `/week?date=${date}`),
+      ).expect(200);
+      const body = response.body as { date: string; days: Row[] };
+      expect(body.date).toBe(date);
+      expect(body.days).toHaveLength(7);
+    },
+  );
+
+  it('uses original selected-date quota and stored booleans, preserving optional gaps', async () => {
+    const configuration = {
+      schedule: { kind: 'weekly', timesPerWeek: 2 },
+      goal: { kind: 'quantity', target: 50, unit: 'pages' },
+    };
+    associations[0].configurationRevisions = [
+      {
+        revisionId: 'new',
+        effectiveFrom: '2025-03-31',
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      },
+    ];
+    logs[1].configurationSnapshot = { revisionId: 'original', configuration };
+    logs[1].amount = 0; // Stored completion, not the mismatching goal, is authority.
+    logs[1].note = 'Original note';
+    logs[4].completed = false;
+    logs[4].amount = 1000;
+    const response = await send(
+      'get',
+      path(owned, '/week?date=2025-03-31'),
+    ).expect(200);
+    const body = response.body as { days: Row[] };
+    expect(body).toMatchObject({
+      configuration,
+      weeklyTarget: 2,
+      weeklyCompleted: false,
+      completedDays: 1,
+    });
+    expect(body.days[0]).toMatchObject({
+      amount: 0,
+      note: 'Original note',
+      completed: true,
+    });
+    expect(body.days[1]).toMatchObject({
+      amount: 1000,
+      completed: false,
+    });
+    expect(body.days[2]).not.toHaveProperty('amount');
+    expect(body.days[2]).not.toHaveProperty('note');
+    const alternate = await send(
+      'get',
+      path(owned, '/week?date=2025-04-01'),
+    ).expect(200);
+    expect(alternate.body).not.toHaveProperty('weeklyTarget');
+    expect(alternate.body).not.toHaveProperty('weeklyCompleted');
+    expect(alternate.body).toMatchObject({ completedDays: 1, days: body.days });
+  });
+
+  it('reads inactive-owned weeks but hides missing and foreign associations identically', async () => {
+    await send('get', path(inactive, '/week?date=2024-02-29')).expect(200);
+    const a = await send('get', path(foreign, '/week')).expect(404);
+    const b = await send('get', path(missing, '/week')).expect(404);
+    expect(a.body).toEqual(b.body);
+    await send('get', path(owned, '/week'), token(other)).expect(404);
+  });
+
+  it.each([
+    '2025-02-29',
+    '0000-01-01',
+    '9999-12-31',
+    '2025-04-01T00:00:00Z',
+    '',
+    'null',
+  ])('rejects unsupported weekly date %s', async (date) => {
+    await send(
+      'get',
+      path(owned, `/week?date=${encodeURIComponent(date)}`),
+    ).expect(400);
+    expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('rejects repeated query values, unknown fields, malformed IDs and absent authentication', async () => {
+    await send(
+      'get',
+      path(owned, '/week?date=2025-03-31&date=2025-04-01'),
+    ).expect(400);
+    await send('get', path(owned, '/week?extra=true')).expect(400);
+    await send('get', '/habits/bad/week').expect(400);
+    await request(app.getHttpServer()).get(path(owned, '/week')).expect(401);
+  });
+
   it.each(['missing', 'malformed', 'expired', 'wrong-secret', 'unknown-user'])(
     'rejects %s JWT before habit lookup',
     async (kind) => {
