@@ -8,12 +8,24 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import slugify from 'slugify';
 
-import { CommonService } from 'src/common/common.service';
+import { CommonService } from '../common/common.service';
+import {
+  calendarDay,
+  calendarMonthBounds,
+  dayLabelToUtcAnchor,
+} from '../common/calendar';
 import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
+
+/** Shape produced by the global-habit lookup and log projection below. */
+type HabitLogSummary = Pick<HabitLog, 'date' | 'completed'> &
+  Pick<Habit, 'title' | 'slug'> & {
+    _id: Types.ObjectId;
+    habitId: Types.ObjectId;
+  };
 
 @Injectable()
 export class HabitsService {
@@ -101,6 +113,30 @@ export class HabitsService {
     ]);
   }
 
+  async findOneByUser(habitId: string, user: User) {
+    const habitUser = await this.habitUserModel
+      .findOne({ userId: user._id, habitId: new Types.ObjectId(habitId) })
+      .lean();
+
+    if (!habitUser) {
+      throw new NotFoundException('Habit not found for this user');
+    }
+
+    const habit = await this.habitModel
+      .findOne({ _id: habitUser.habitId })
+      .lean();
+    if (!habit) {
+      throw new NotFoundException('Habit not found for this user');
+    }
+
+    return {
+      habitId: habitUser.habitId,
+      title: habit.title,
+      slug: habit.slug,
+      active: habitUser.active,
+    };
+  }
+
   async update(habitId: string, user: User) {
     const habitUser = await this.habitUserModel
       .findOneAndUpdate(
@@ -126,7 +162,7 @@ export class HabitsService {
   }
 
   async complete(habitId: string, user: User) {
-    const today = this.normalizeDate(new Date());
+    const today = this.todayAnchor(user);
 
     // 1️ Verificar que el hábito pertenece al usuario y está activo
     const habitUser = await this.habitUserModel
@@ -164,19 +200,15 @@ export class HabitsService {
   }
 
   async getLogs(habitId: string, user: User, getLogsDto: GetLogsDto) {
-    const now = new Date();
-
-    const startDate = getLogsDto.startDate
-      ? this.normalizeDate(new Date(getLogsDto.startDate))
-      : this.normalizeDate(
-          new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
-        );
-
-    const endDate = getLogsDto.endDate
-      ? this.normalizeDate(new Date(getLogsDto.endDate))
-      : this.normalizeDate(
-          new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)),
-        );
+    const month = calendarMonthBounds(new Date(), user.timeZone ?? 'UTC');
+    const startDate =
+      getLogsDto.startDate === undefined
+        ? month.start
+        : this.queryAnchor(getLogsDto.startDate);
+    const endDate =
+      getLogsDto.endDate === undefined
+        ? month.end
+        : this.queryAnchor(getLogsDto.endDate);
 
     if (startDate > endDate) {
       throw new BadRequestException('Invalid date range');
@@ -195,14 +227,22 @@ export class HabitsService {
       .exec();
   }
 
-  private normalizeDate(date: Date) {
-    return new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-    );
+  private todayAnchor(user: User) {
+    return dayLabelToUtcAnchor(calendarDay(new Date(), user.timeZone ?? 'UTC'));
+  }
+
+  private queryAnchor(label: string) {
+    try {
+      return dayLabelToUtcAnchor(label);
+    } catch {
+      throw new BadRequestException(
+        'Expected a valid YYYY-MM-DD calendar date',
+      );
+    }
   }
 
   async deleteHabitLog(habitId: string, user: User) {
-    const today = this.normalizeDate(new Date());
+    const today = this.todayAnchor(user);
 
     return await this.habitLogModel.deleteOne({
       userId: user._id,
@@ -212,7 +252,7 @@ export class HabitsService {
   }
 
   async getLogsByUser(user: User) {
-    return await this.habitLogModel.aggregate([
+    return await this.habitLogModel.aggregate<HabitLogSummary>([
       {
         $match: {
           userId: new Types.ObjectId(user._id),

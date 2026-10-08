@@ -26,7 +26,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     const user = await this.userModel
       .findById(id)
-      .select('_id email fullName roles')
+      .select('_id email fullName roles timeZone')
       .lean()
       .exec();
 

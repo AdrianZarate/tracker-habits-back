@@ -35,6 +35,21 @@ export class HabitsController {
     return this.habitsService.findAllByUser(user);
   }
 
+  @Get('logs')
+  @ApiOperation({ summary: 'Obtener todos los logs del usuario' })
+  getLogsByUser(@GetUser() user: User) {
+    return this.habitsService.getLogsByUser(user);
+  }
+
+  @Get(':habitId')
+  @ApiOperation({ summary: 'Obtener un hábito del usuario, incluso inactivo' })
+  findOne(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.findOneByUser(habitId, user);
+  }
+
   @Patch(':habitId')
   @ApiOperation({ summary: 'Actualizar un hábito' })
   update(
@@ -70,11 +85,5 @@ export class HabitsController {
     @GetUser() user: User,
   ) {
     return this.habitsService.deleteHabitLog(habitId, user);
-  }
-
-  @Get('logs')
-  @ApiOperation({ summary: 'Obtener todos los logs del usuario' })
-  getLogsByUser(@GetUser() user: User) {
-    return this.habitsService.getLogsByUser(user);
   }
 }
