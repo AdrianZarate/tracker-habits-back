@@ -12,6 +12,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { HabitsService } from './habits.service';
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Auth, GetUser } from 'src/auth/decorators';
 import { User } from 'src/auth/entities/user.entity';
 import { ParseMongoIdPipe } from 'src/common/pipes/parse-mongo-id.pipe';
@@ -50,8 +51,22 @@ export class HabitsController {
     return this.habitsService.findOneByUser(habitId, user);
   }
 
+  @Patch(':habitId/definition')
+  @ApiOperation({ summary: 'Editar la definición personal, incluso inactiva' })
+  updateDefinition(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Body() updateHabitUserDto: UpdateHabitUserDto,
+    @GetUser() user: User,
+  ) {
+    return this.habitsService.updateDefinition(
+      habitId,
+      updateHabitUserDto,
+      user,
+    );
+  }
+
   @Patch(':habitId')
-  @ApiOperation({ summary: 'Actualizar un hábito' })
+  @ApiOperation({ summary: 'Desactivar un hábito (compatibilidad)' })
   update(
     @Param('habitId', ParseMongoIdPipe) habitId: string,
     @GetUser() user: User,

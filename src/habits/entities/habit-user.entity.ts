@@ -19,6 +19,19 @@ export class HabitUser extends Document {
   })
   habitId: Types.ObjectId;
 
+  // No title default: legacy associations fall back to the shared catalog.
+  @Prop({ trim: true, minlength: 3, maxlength: 200 })
+  title?: string;
+
+  @Prop({ trim: true, maxlength: 80 })
+  category?: string;
+
+  @Prop({ match: /^#[0-9a-fA-F]{6}$/ })
+  color?: string;
+
+  @Prop({ trim: true, maxlength: 64 })
+  icon?: string;
+
   @Prop({ default: true })
   active: boolean;
 }

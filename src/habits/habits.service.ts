@@ -18,6 +18,7 @@ import { User } from 'src/auth/entities/user.entity';
 
 import { CreateHabitDto } from './dto/create-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
+import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
 
 /** Shape produced by the global-habit lookup and log projection below. */
@@ -53,8 +54,7 @@ export class HabitsService {
         // Busca por slug para evitar duplicados y mantener consistencia
         { slug },
         {
-          title: createHabitDto.title,
-          slug,
+          $setOnInsert: { title: createHabitDto.title, slug },
         },
         {
           returnDocument: 'after', // Devuelve el documento después de la actualización
@@ -69,13 +69,12 @@ export class HabitsService {
           userId: user._id,
           habitId: habit._id,
         },
-        {
-          active: true,
-        },
+        this.personalUpdate(createHabitDto, true),
         {
           returnDocument: 'after',
           upsert: true,
           setDefaultsOnInsert: true,
+          runValidators: true,
         },
       );
 
@@ -106,8 +105,11 @@ export class HabitsService {
         $project: {
           _id: 0,
           habitId: '$habit._id',
-          title: '$habit.title',
+          title: { $ifNull: ['$title', '$habit.title'] },
           slug: '$habit.slug',
+          category: { $ifNull: ['$category', '$$REMOVE'] },
+          color: { $ifNull: ['$color', '$$REMOVE'] },
+          icon: { $ifNull: ['$icon', '$$REMOVE'] },
         },
       },
     ]);
@@ -122,6 +124,15 @@ export class HabitsService {
       throw new NotFoundException('Habit not found for this user');
     }
 
+    return this.personalView(habitUser);
+  }
+
+  private async personalView(
+    habitUser: Pick<
+      HabitUser,
+      'habitId' | 'active' | 'title' | 'category' | 'color' | 'icon'
+    >,
+  ) {
     const habit = await this.habitModel
       .findOne({ _id: habitUser.habitId })
       .lean();
@@ -131,10 +142,45 @@ export class HabitsService {
 
     return {
       habitId: habitUser.habitId,
-      title: habit.title,
+      title: habitUser.title ?? habit.title,
       slug: habit.slug,
       active: habitUser.active,
+      ...(habitUser.category != null ? { category: habitUser.category } : {}),
+      ...(habitUser.color != null ? { color: habitUser.color } : {}),
+      ...(habitUser.icon != null ? { icon: habitUser.icon } : {}),
     };
+  }
+
+  private personalUpdate(dto: UpdateHabitUserDto, active?: boolean) {
+    const $set: Record<string, string | boolean> = {};
+    const $unset: Record<string, 1> = {};
+    if (active !== undefined) $set.active = active;
+    if (dto.title !== undefined) $set.title = dto.title;
+    for (const key of ['category', 'color', 'icon'] as const) {
+      if (dto[key] === '') $unset[key] = 1;
+      else if (dto[key] !== undefined) $set[key] = dto[key];
+    }
+    return {
+      ...(Object.keys($set).length ? { $set } : {}),
+      ...(Object.keys($unset).length ? { $unset } : {}),
+    };
+  }
+
+  async updateDefinition(habitId: string, dto: UpdateHabitUserDto, user: User) {
+    const update = this.personalUpdate(dto);
+    if (!Object.keys(update).length) return this.findOneByUser(habitId, user);
+    const habitUser = await this.habitUserModel
+      .findOneAndUpdate(
+        { userId: user._id, habitId: new Types.ObjectId(habitId) },
+        update,
+        { returnDocument: 'after', runValidators: true },
+      )
+      .lean()
+      .exec();
+    if (!habitUser) {
+      throw new NotFoundException('Habit not found for this user');
+    }
+    return this.personalView(habitUser);
   }
 
   async update(habitId: string, user: User) {
@@ -268,10 +314,34 @@ export class HabitsService {
       },
       { $unwind: '$habit' },
       {
+        $lookup: {
+          from: 'habitusers',
+          let: { owner: '$userId', habit: '$habitId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$userId', '$$owner'] },
+                    { $eq: ['$habitId', '$$habit'] },
+                  ],
+                },
+              },
+            },
+          ],
+          as: 'definition',
+        },
+      },
+      {
         $project: {
           _id: 1,
           habitId: '$habit._id',
-          title: '$habit.title',
+          title: {
+            $ifNull: [
+              { $arrayElemAt: ['$definition.title', 0] },
+              '$habit.title',
+            ],
+          },
           slug: '$habit.slug',
           date: 1,
           completed: 1,

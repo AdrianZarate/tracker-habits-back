@@ -48,8 +48,12 @@ describe('Habit route declarations', () => {
 
 describe('Owner-scoped habit calendar operations', () => {
   let service: HabitsService;
-  const habit = { findOne: jest.fn() };
-  const association = { findOne: jest.fn(), findOneAndUpdate: jest.fn() };
+  const habit = { findOne: jest.fn(), findOneAndUpdate: jest.fn() };
+  const association = {
+    findOne: jest.fn(),
+    findOneAndUpdate: jest.fn(),
+    aggregate: jest.fn(),
+  };
   const logs = {
     find: jest.fn(),
     findOneAndUpdate: jest.fn(),
@@ -126,6 +130,247 @@ describe('Owner-scoped habit calendar operations', () => {
       expect(habit.findOne).not.toHaveBeenCalled();
     },
   );
+
+  it('uses personal metadata without changing catalog identity', async () => {
+    association.findOne.mockReturnValue(
+      query({
+        habitId,
+        active: false,
+        title: 'My reading',
+        category: 'Learning',
+        color: '#123abc',
+        icon: 'book',
+      }),
+    );
+    expect(await service.findOneByUser(id, account())).toEqual({
+      habitId,
+      active: false,
+      title: 'My reading',
+      category: 'Learning',
+      color: '#123abc',
+      icon: 'book',
+      slug: 'read',
+    });
+  });
+
+  it.each([true, false])(
+    'create/reactivate stores personal title with previous active=%s',
+    async (active) => {
+      const catalog = { _id: habitId, title: 'Original catalog', slug: 'read' };
+      habit.findOneAndUpdate.mockResolvedValue(catalog);
+      const owned = {
+        userId: ownerId,
+        habitId,
+        active,
+        title: 'Old title',
+        icon: 'book',
+      };
+      const foreign = {
+        userId: otherId,
+        habitId,
+        active: false,
+        title: 'Other title',
+      };
+      association.findOneAndUpdate.mockImplementation(
+        (
+          filter: { userId: Types.ObjectId; habitId: Types.ObjectId },
+          update: { $set: object },
+        ) => {
+          const row = [owned, foreign].find(
+            (item) =>
+              item.userId.equals(filter.userId) &&
+              item.habitId.equals(filter.habitId),
+          );
+          Object.assign(row!, update.$set);
+          return Promise.resolve({ toObject: () => row });
+        },
+      );
+      expect(await service.create({ title: 'Read' }, account())).toEqual({
+        ...owned,
+        title: 'Read',
+        active: true,
+      });
+      expect(owned.active).toBe(true);
+      expect(owned.icon).toBe('book');
+      expect(foreign.title).toBe('Other title');
+      expect(habit.findOneAndUpdate).toHaveBeenCalledWith(
+        { slug: 'read' },
+        { $setOnInsert: { title: 'Read', slug: 'read' } },
+        expect.objectContaining({ upsert: true }),
+      );
+      expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+        { userId: ownerId, habitId },
+        { $set: { active: true, title: 'Read' } },
+        expect.objectContaining({ upsert: true }),
+      );
+      expect(catalog.title).toBe('Original catalog');
+    },
+  );
+
+  it('projects personal titles and optional metadata in the owner list', async () => {
+    association.aggregate.mockResolvedValue([]);
+    await service.findAllByUser(account());
+    expect(association.aggregate).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { $match: { userId: ownerId, active: true } },
+        {
+          $project: {
+            _id: 0,
+            habitId: '$habit._id',
+            title: { $ifNull: ['$title', '$habit.title'] },
+            slug: '$habit.slug',
+            category: { $ifNull: ['$category', '$$REMOVE'] },
+            color: { $ifNull: ['$color', '$$REMOVE'] },
+            icon: { $ifNull: ['$icon', '$$REMOVE'] },
+          },
+        },
+      ]),
+    );
+  });
+
+  it('joins log titles on both authenticated owner and stable habit identity', async () => {
+    logs.aggregate.mockResolvedValue([]);
+    await service.getLogsByUser(account());
+    expect(logs.aggregate).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          $lookup: {
+            from: 'habitusers',
+            let: { owner: '$userId', habit: '$habitId' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$userId', '$$owner'] },
+                      { $eq: ['$habitId', '$$habit'] },
+                    ],
+                  },
+                },
+              },
+            ],
+            as: 'definition',
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            habitId: '$habit._id',
+            title: {
+              $ifNull: [
+                { $arrayElemAt: ['$definition.title', 0] },
+                '$habit.title',
+              ],
+            },
+            slug: '$habit.slug',
+            date: 1,
+            completed: 1,
+          },
+        },
+      ]),
+    );
+  });
+
+  it.each([true, false])(
+    'edits an owned definition with active=%s without touching logs or catalog',
+    async (active) => {
+      association.findOneAndUpdate.mockReturnValue(
+        executableQuery({
+          habitId,
+          active,
+          title: 'Personal read',
+          color: '#abcdef',
+        }),
+      );
+      expect(
+        await service.updateDefinition(
+          id,
+          { title: 'Personal read', category: '', color: '#abcdef' },
+          account(),
+        ),
+      ).toEqual({
+        habitId,
+        active,
+        title: 'Personal read',
+        color: '#abcdef',
+        slug: 'read',
+      });
+      expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+        { userId: ownerId, habitId },
+        {
+          $set: { title: 'Personal read', color: '#abcdef' },
+          $unset: { category: 1 },
+        },
+        { returnDocument: 'after', runValidators: true },
+      );
+      expect(habit.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['missing', 'foreign'])(
+    'definition edit returns equivalent 404 for %s and never upserts',
+    async (scenario) => {
+      const foreign = { userId: otherId, habitId, title: 'Private title' };
+      association.findOneAndUpdate.mockImplementation(
+        (filter: { userId: Types.ObjectId; habitId: Types.ObjectId }) =>
+          executableQuery(
+            scenario === 'foreign' && foreign.userId.equals(filter.userId)
+              ? foreign
+              : null,
+          ),
+      );
+      await expect(
+        service.updateDefinition(id, { title: 'Changed' }, account()),
+      ).rejects.toEqual(new NotFoundException('Habit not found for this user'));
+      expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+        { userId: ownerId, habitId },
+        { $set: { title: 'Changed' } },
+        { returnDocument: 'after', runValidators: true },
+      );
+      expect(foreign.title).toBe('Private title');
+      expect(habit.findOne).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts an empty definition patch as an owned read, not deactivation', async () => {
+    expect(await service.updateDefinition(id, {}, account())).toEqual({
+      habitId,
+      active: true,
+      title: 'Read',
+      slug: 'read',
+    });
+    expect(association.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('creates personal metadata and clears supplied empty metadata', async () => {
+    habit.findOneAndUpdate.mockResolvedValue({ _id: habitId });
+    association.findOneAndUpdate.mockResolvedValue({
+      toObject: () => ({
+        habitId,
+        title: 'Read',
+        category: 'Learning',
+        color: '#abcdef',
+      }),
+    });
+    await service.create(
+      { title: 'Read', category: 'Learning', color: '#abcdef', icon: '' },
+      account(),
+    );
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      {
+        $set: {
+          active: true,
+          title: 'Read',
+          category: 'Learning',
+          color: '#abcdef',
+        },
+        $unset: { icon: 1 },
+      },
+      expect.objectContaining({ upsert: true }),
+    );
+  });
 
   it('returns 404 for an orphaned association', async () => {
     habit.findOne.mockReturnValue(query(null));
