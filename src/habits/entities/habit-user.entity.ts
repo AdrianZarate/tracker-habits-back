@@ -1,7 +1,30 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
-import { User } from 'src/auth/entities/user.entity';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
+import { User } from '../../auth/entities/user.entity';
 import { Habit } from './habit.entity';
+import {
+  ConfigurationRevision,
+  isValidConfiguration,
+  isValidConfigurationDate,
+} from '../configuration/habit-configuration';
+
+const ConfigurationRevisionSchema = new MongooseSchema(
+  {
+    revisionId: { type: String, required: true, match: /^[a-f0-9]{24}$/ },
+    effectiveFrom: {
+      type: String,
+      required: true,
+      validate: isValidConfigurationDate,
+    },
+    // Mixed preserves discriminator fields for the shared strict validator, not casting.
+    configuration: {
+      type: MongooseSchema.Types.Mixed,
+      required: true,
+      validate: isValidConfiguration,
+    },
+  },
+  { _id: false, strict: 'throw' },
+);
 
 @Schema()
 export class HabitUser extends Document {
@@ -31,6 +54,10 @@ export class HabitUser extends Document {
 
   @Prop({ trim: true, maxlength: 64 })
   icon?: string;
+
+  // No default/backfill: legacy rows resolve daily checkbox for every date.
+  @Prop({ type: [ConfigurationRevisionSchema], default: undefined })
+  configurationRevisions?: ConfigurationRevision[];
 
   @Prop({ default: true })
   active: boolean;

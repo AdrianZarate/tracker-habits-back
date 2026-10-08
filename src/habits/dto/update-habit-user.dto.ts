@@ -1,11 +1,9 @@
 import { Transform } from 'class-transformer';
 import { IsString, MaxLength, MinLength, ValidateIf } from 'class-validator';
-import {
-  PersonalHabitMetadataDto,
-  trimPersonalText,
-} from './personal-habit-metadata.dto';
+import { trimPersonalText } from './personal-habit-metadata.dto';
+import { HabitConfigurationDto } from './habit-configuration.dto';
 
-export class UpdateHabitUserDto extends PersonalHabitMetadataDto {
+export class UpdateHabitUserDto extends HabitConfigurationDto {
   @Transform(trimPersonalText)
   @ValidateIf((_object, value: unknown) => value !== undefined)
   @IsString()

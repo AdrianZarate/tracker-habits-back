@@ -20,6 +20,19 @@ import { CreateHabitDto } from './dto/create-habit.dto';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { UpdateHabitUserDto } from './dto/update-habit-user.dto';
 import { Habit, HabitLog, HabitUser } from './entities';
+import {
+  configurationView,
+  HabitConfiguration,
+  legacyConfiguration,
+  nextCalendarDay,
+  parseConfiguration,
+} from './configuration/habit-configuration';
+
+type HabitListRow = Pick<
+  HabitUser,
+  'habitId' | 'title' | 'category' | 'color' | 'icon' | 'configurationRevisions'
+> &
+  Pick<Habit, 'slug'>;
 
 /** Shape produced by the global-habit lookup and log projection below. */
 type HabitLogSummary = Pick<HabitLog, 'date' | 'completed'> &
@@ -42,6 +55,10 @@ export class HabitsService {
   ) {}
 
   async create(createHabitDto: CreateHabitDto, user: User) {
+    const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
+    const configuration =
+      this.validatedConfiguration(createHabitDto.configuration) ??
+      legacyConfiguration();
     const slug = slugify(createHabitDto.title, {
       lower: true,
       strict: true,
@@ -69,7 +86,14 @@ export class HabitsService {
           userId: user._id,
           habitId: habit._id,
         },
-        this.personalUpdate(createHabitDto, true),
+        {
+          ...this.personalUpdate(createHabitDto, true),
+          $setOnInsert: {
+            configurationRevisions: [
+              this.configurationRevision(configuration, today),
+            ],
+          },
+        },
         {
           returnDocument: 'after',
           upsert: true,
@@ -78,14 +102,15 @@ export class HabitsService {
         },
       );
 
-      return habitUser.toObject();
+      return this.associationView(habitUser.toObject(), today);
     } catch (error) {
       this.commonService.handleExceptions(error, 'Habit');
     }
   }
 
   async findAllByUser(user: User) {
-    return this.habitUserModel.aggregate([
+    const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
+    const rows = await this.habitUserModel.aggregate<HabitListRow>([
       {
         $match: {
           userId: new Types.ObjectId(user._id),
@@ -110,12 +135,15 @@ export class HabitsService {
           category: { $ifNull: ['$category', '$$REMOVE'] },
           color: { $ifNull: ['$color', '$$REMOVE'] },
           icon: { $ifNull: ['$icon', '$$REMOVE'] },
+          configurationRevisions: 1,
         },
       },
     ]);
+    return rows.map((row) => this.associationView(row, today));
   }
 
-  async findOneByUser(habitId: string, user: User) {
+  async findOneByUser(habitId: string, user: User, instant = new Date()) {
+    const today = calendarDay(instant, user.timeZone ?? 'UTC');
     const habitUser = await this.habitUserModel
       .findOne({ userId: user._id, habitId: new Types.ObjectId(habitId) })
       .lean();
@@ -124,14 +152,52 @@ export class HabitsService {
       throw new NotFoundException('Habit not found for this user');
     }
 
-    return this.personalView(habitUser);
+    return this.personalView(habitUser, today);
+  }
+
+  private associationView<
+    T extends { configurationRevisions?: HabitUser['configurationRevisions'] },
+  >(row: T, today: string) {
+    const { configurationRevisions, ...fields } = row;
+    return { ...fields, ...configurationView(configurationRevisions, today) };
+  }
+
+  private configurationRevision(
+    configuration: HabitConfiguration,
+    effectiveFrom: string,
+  ) {
+    return {
+      revisionId: new Types.ObjectId().toHexString(),
+      effectiveFrom,
+      configuration,
+    };
+  }
+
+  private validatedConfiguration(
+    value: unknown,
+  ): HabitConfiguration | undefined {
+    if (value === undefined) return undefined;
+    try {
+      return parseConfiguration(value);
+    } catch {
+      throw new BadRequestException(
+        'Expected a complete valid schedule and goal configuration',
+      );
+    }
   }
 
   private async personalView(
     habitUser: Pick<
       HabitUser,
-      'habitId' | 'active' | 'title' | 'category' | 'color' | 'icon'
+      | 'habitId'
+      | 'active'
+      | 'title'
+      | 'category'
+      | 'color'
+      | 'icon'
+      | 'configurationRevisions'
     >,
+    today: string,
   ) {
     const habit = await this.habitModel
       .findOne({ _id: habitUser.habitId })
@@ -148,6 +214,7 @@ export class HabitsService {
       ...(habitUser.category != null ? { category: habitUser.category } : {}),
       ...(habitUser.color != null ? { color: habitUser.color } : {}),
       ...(habitUser.icon != null ? { icon: habitUser.icon } : {}),
+      ...configurationView(habitUser.configurationRevisions, today),
     };
   }
 
@@ -167,8 +234,24 @@ export class HabitsService {
   }
 
   async updateDefinition(habitId: string, dto: UpdateHabitUserDto, user: User) {
-    const update = this.personalUpdate(dto);
-    if (!Object.keys(update).length) return this.findOneByUser(habitId, user);
+    const instant = new Date();
+    const today = calendarDay(instant, user.timeZone ?? 'UTC');
+    const configuration = this.validatedConfiguration(dto.configuration);
+    const update = {
+      ...this.personalUpdate(dto),
+      ...(configuration
+        ? {
+            $push: {
+              configurationRevisions: this.configurationRevision(
+                configuration,
+                nextCalendarDay(today),
+              ),
+            },
+          }
+        : {}),
+    };
+    if (!Object.keys(update).length)
+      return this.findOneByUser(habitId, user, instant);
     const habitUser = await this.habitUserModel
       .findOneAndUpdate(
         { userId: user._id, habitId: new Types.ObjectId(habitId) },
@@ -180,10 +263,11 @@ export class HabitsService {
     if (!habitUser) {
       throw new NotFoundException('Habit not found for this user');
     }
-    return this.personalView(habitUser);
+    return this.personalView(habitUser, today);
   }
 
   async update(habitId: string, user: User) {
+    const today = calendarDay(new Date(), user.timeZone ?? 'UTC');
     const habitUser = await this.habitUserModel
       .findOneAndUpdate(
         {
@@ -204,7 +288,7 @@ export class HabitsService {
       throw new NotFoundException('Habit not found for this user');
     }
 
-    return habitUser;
+    return this.associationView(habitUser, today);
   }
 
   async complete(habitId: string, user: User) {

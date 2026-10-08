@@ -8,6 +8,10 @@ import { model, Types } from 'mongoose';
 import { User, UserSchema } from '../auth/entities/user.entity';
 import { GetLogsDto } from './dto/get-logs.dto';
 import { HabitsService } from './habits.service';
+import {
+  ConfigurationRevision,
+  HabitConfiguration,
+} from './configuration/habit-configuration';
 
 import { CommonService } from '../common/common.service';
 
@@ -200,7 +204,7 @@ describe('Owner-scoped habit calendar operations', () => {
       );
       expect(association.findOneAndUpdate).toHaveBeenCalledWith(
         { userId: ownerId, habitId },
-        { $set: { active: true, title: 'Read' } },
+        expect.objectContaining({ $set: { active: true, title: 'Read' } }),
         expect.objectContaining({ upsert: true }),
       );
       expect(catalog.title).toBe('Original catalog');
@@ -222,6 +226,7 @@ describe('Owner-scoped habit calendar operations', () => {
             category: { $ifNull: ['$category', '$$REMOVE'] },
             color: { $ifNull: ['$color', '$$REMOVE'] },
             icon: { $ifNull: ['$icon', '$$REMOVE'] },
+            configurationRevisions: 1,
           },
         },
       ]),
@@ -359,7 +364,7 @@ describe('Owner-scoped habit calendar operations', () => {
     );
     expect(association.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: ownerId, habitId },
-      {
+      expect.objectContaining({
         $set: {
           active: true,
           title: 'Read',
@@ -367,9 +372,306 @@ describe('Owner-scoped habit calendar operations', () => {
           color: '#abcdef',
         },
         $unset: { icon: 1 },
+      }),
+      expect.objectContaining({ upsert: true }),
+    );
+  });
+
+  it('appends a complete next-day revision atomically on an inactive owned row', async () => {
+    const configuration = {
+      schedule: { kind: 'weekdays' as const, days: [1, 7] },
+      goal: { kind: 'quantity' as const, target: 20, unit: 'pages' },
+    };
+    association.findOneAndUpdate.mockReturnValue(
+      executableQuery({ habitId, active: false }),
+    );
+    const dto = { configuration, title: undefined };
+    await service.updateDefinition(id, dto, account('America/Los_Angeles'));
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      {
+        $push: {
+          configurationRevisions: {
+            revisionId: expect.stringMatching(/^[a-f0-9]{24}$/) as unknown,
+            effectiveFrom: '2025-04-01',
+            configuration,
+          },
+        },
+      },
+      { returnDocument: 'after', runValidators: true },
+    );
+    expect(association.findOne).not.toHaveBeenCalled();
+    expect(habit.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('initializes a default revision only on insertion when POST omits configuration', async () => {
+    habit.findOneAndUpdate.mockResolvedValue({ _id: habitId });
+    association.findOneAndUpdate.mockResolvedValue({
+      toObject: () => ({ habitId }),
+    });
+    await service.create({ title: 'Read' }, account('America/Los_Angeles'));
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      {
+        $set: { title: 'Read', active: true },
+        $setOnInsert: {
+          configurationRevisions: [
+            {
+              revisionId: expect.stringMatching(/^[a-f0-9]{24}$/) as unknown,
+              effectiveFrom: '2025-03-31',
+              configuration: {
+                schedule: { kind: 'daily' },
+                goal: { kind: 'checkbox' },
+              },
+            },
+          ],
+        },
       },
       expect.objectContaining({ upsert: true }),
     );
+  });
+
+  it.each([true, false])(
+    'preserves every existing revision on repeated POST (versioned=%s)',
+    async (versioned) => {
+      const original: ConfigurationRevision = {
+        revisionId: '000000000000000000000010',
+        effectiveFrom: '2020-01-01',
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      };
+      const owned = {
+        userId: ownerId,
+        habitId,
+        active: false,
+        title: 'Old',
+        ...(versioned ? { configurationRevisions: [original] } : {}),
+      };
+      habit.findOneAndUpdate.mockResolvedValue({ _id: habitId });
+      association.findOneAndUpdate.mockImplementation(
+        (
+          _filter: unknown,
+          update: { $set: object; $push?: unknown; $setOnInsert: object },
+        ) => {
+          expect(update.$push).toBeUndefined();
+          expect(update.$set).not.toHaveProperty('configurationRevisions');
+          expect(update.$setOnInsert).toHaveProperty('configurationRevisions');
+          Object.assign(owned, update.$set);
+          return Promise.resolve({ toObject: () => owned });
+        },
+      );
+      const configuration: HabitConfiguration = {
+        schedule: { kind: 'weekly', timesPerWeek: 2 },
+        goal: { kind: 'quantity', target: 2, unit: 'hours' },
+      };
+      const dto = { title: 'Read', configuration };
+      for (let i = 0; i < 2; i++) {
+        const result = await service.create(dto, account());
+        expect(result).not.toHaveProperty('configurationRevisions');
+        expect(result).toMatchObject({ title: 'Read', active: true });
+        if (versioned)
+          expect(result.configuration).toEqual(original.configuration);
+        else expect(result).not.toHaveProperty('configuration');
+      }
+      if (versioned) expect(owned.configurationRevisions).toEqual([original]);
+      else expect(owned).not.toHaveProperty('configurationRevisions');
+    },
+  );
+
+  it('creates a supplied complete configuration today and captures the date before awaited writes', async () => {
+    const configuration: HabitConfiguration = {
+      schedule: { kind: 'weekly', timesPerWeek: 2 },
+      goal: { kind: 'quantity', target: 1, unit: ' hours ' },
+    };
+    habit.findOneAndUpdate.mockImplementation(() => {
+      jest.setSystemTime(new Date('2025-04-02T00:30:00Z'));
+      return Promise.resolve({ _id: habitId });
+    });
+    association.findOneAndUpdate.mockImplementation(
+      (
+        _filter: unknown,
+        update: {
+          $setOnInsert: { configurationRevisions: ConfigurationRevision[] };
+        },
+      ) => {
+        expect(update.$setOnInsert.configurationRevisions).toHaveLength(1);
+        expect(update.$setOnInsert.configurationRevisions[0]).toMatchObject({
+          effectiveFrom: '2025-04-01',
+          configuration: {
+            ...configuration,
+            goal: { kind: 'quantity', target: 1, unit: 'hours' },
+          },
+        });
+        return Promise.resolve({
+          toObject: () => ({ habitId, ...update.$setOnInsert }),
+        });
+      },
+    );
+    const result = await service.create(
+      { title: 'Read', configuration },
+      account(),
+    );
+    expect(result.configuration?.goal).toMatchObject({ unit: 'hours' });
+    expect(result).not.toHaveProperty('pendingConfiguration');
+    expect(configuration.goal).toMatchObject({ unit: ' hours ' });
+  });
+
+  it('retains original goals and all same-day edits, with only the last pending winner exposed', async () => {
+    const original: ConfigurationRevision = {
+      revisionId: '000000000000000000000010',
+      effectiveFrom: '2020-01-01',
+      configuration: {
+        schedule: { kind: 'daily' },
+        goal: { kind: 'quantity', target: 10, unit: 'pages' },
+      },
+    };
+    const revisions = [original];
+    const foreign = { configurationRevisions: [original] };
+    const owned = { habitId, active: false, configurationRevisions: revisions };
+    association.findOneAndUpdate.mockImplementation(
+      (
+        filter: { userId: Types.ObjectId; habitId: Types.ObjectId },
+        update: { $push: { configurationRevisions: ConfigurationRevision } },
+      ) => {
+        expect(filter).toEqual({ userId: ownerId, habitId });
+        revisions.push(update.$push.configurationRevisions);
+        return executableQuery(owned);
+      },
+    );
+    for (const target of [20, 30]) {
+      const result = await service.updateDefinition(
+        id,
+        {
+          configuration: {
+            schedule: { kind: 'weekdays', days: [6, 7] },
+            goal: { kind: 'quantity', target, unit: 'pages' },
+          },
+        },
+        account(),
+      );
+      expect(result.configuration).toEqual(original.configuration);
+      expect(result.pendingConfiguration).toEqual(
+        revisions[revisions.length - 1],
+      );
+      expect(result).not.toHaveProperty('configurationRevisions');
+    }
+    expect(revisions).toHaveLength(3);
+    expect(revisions[1].revisionId).not.toBe(revisions[2].revisionId);
+    expect(revisions[0]).toEqual(original);
+    expect(foreign.configurationRevisions).toEqual([original]);
+    expect(association.findOne).not.toHaveBeenCalled();
+    association.findOne.mockReturnValue(query(owned));
+    jest.setSystemTime(new Date('2025-04-02T00:30:00Z'));
+    const detail = await service.findOneByUser(id, account());
+    expect(detail.configuration?.goal).toMatchObject({ target: 30 });
+    expect(detail).not.toHaveProperty('pendingConfiguration');
+  });
+
+  it('shares account-date resolution between owner list and inactive detail without exposing history', async () => {
+    const revisions: ConfigurationRevision[] = [
+      {
+        revisionId: '000000000000000000000010',
+        effectiveFrom: '2025-03-31',
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      },
+      {
+        revisionId: '000000000000000000000011',
+        effectiveFrom: '2025-04-01',
+        configuration: {
+          schedule: { kind: 'weekly', timesPerWeek: 3 },
+          goal: { kind: 'quantity', target: 20, unit: 'pages' },
+        },
+      },
+    ];
+    const row = {
+      habitId,
+      title: 'Read',
+      slug: 'read',
+      configurationRevisions: revisions,
+    };
+    association.aggregate.mockResolvedValue([
+      row,
+      { habitId, title: 'Legacy', slug: 'legacy' },
+    ]);
+    association.findOne.mockReturnValue(query({ ...row, active: false }));
+    const [listed, legacy] = await service.findAllByUser(
+      account('America/Los_Angeles'),
+    );
+    const detail = await service.findOneByUser(
+      id,
+      account('America/Los_Angeles'),
+    );
+    expect(listed).toEqual({
+      habitId,
+      title: 'Read',
+      slug: 'read',
+      configuration: revisions[0].configuration,
+      pendingConfiguration: revisions[1],
+    });
+    expect(detail).toEqual({ ...listed, active: false });
+    expect(legacy).toEqual({ habitId, title: 'Legacy', slug: 'legacy' });
+    expect(row.configurationRevisions).toEqual(revisions);
+  });
+
+  it('metadata-only edits never append a revision on versioned rows', async () => {
+    const revisions: ConfigurationRevision[] = [
+      {
+        revisionId: '000000000000000000000010',
+        effectiveFrom: '2020-01-01',
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      },
+    ];
+    association.findOneAndUpdate.mockReturnValue(
+      executableQuery({
+        habitId,
+        active: true,
+        title: 'New',
+        configurationRevisions: revisions,
+      }),
+    );
+    const result = await service.updateDefinition(
+      id,
+      { title: 'New' },
+      account(),
+    );
+    expect(result.configuration).toEqual(revisions[0].configuration);
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      { $set: { title: 'New' } },
+      { returnDocument: 'after', runValidators: true },
+    );
+  });
+
+  it('a foreign/missing configuration edit returns 404 without upsert or catalog mutation', async () => {
+    association.findOneAndUpdate.mockReturnValue(executableQuery(null));
+    await expect(
+      service.updateDefinition(
+        id,
+        {
+          configuration: {
+            schedule: { kind: 'daily' },
+            goal: { kind: 'checkbox' },
+          },
+        },
+        account(),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      expect.objectContaining({ $push: expect.any(Object) as unknown }),
+      { returnDocument: 'after', runValidators: true },
+    );
+    expect(habit.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
   it('returns 404 for an orphaned association', async () => {
@@ -445,6 +747,36 @@ describe('Owner-scoped habit calendar operations', () => {
       expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
     },
   );
+
+  it('does not leak the new raw revision array through the legacy deactivation response', async () => {
+    const configuration: HabitConfiguration = {
+      schedule: { kind: 'daily' },
+      goal: { kind: 'checkbox' },
+    };
+    association.findOneAndUpdate.mockReturnValue(
+      executableQuery({
+        habitId,
+        active: false,
+        configurationRevisions: [
+          {
+            revisionId: '000000000000000000000010',
+            effectiveFrom: '2020-01-01',
+            configuration,
+          },
+        ],
+      }),
+    );
+    expect(await service.update(id, account())).toEqual({
+      habitId,
+      active: false,
+      configuration,
+    });
+    expect(association.findOneAndUpdate).toHaveBeenCalledWith(
+      { userId: ownerId, habitId },
+      { active: false },
+      { returnDocument: 'after' },
+    );
+  });
 
   it('deactivation remains owner-scoped and idempotent', async () => {
     association.findOneAndUpdate.mockReturnValue(

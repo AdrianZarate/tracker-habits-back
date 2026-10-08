@@ -1,8 +1,10 @@
 # Edit your personal habit definition
 
-Personal title, category, color and icon belong to the authenticated user's
-`HabitUser` association, not the shared habit catalog. Editing them never changes
-another user's definition, the habit ID/slug, or existing log keys and dates.
+Personal metadata and schedule/goal configurations belong to the authenticated
+user's `HabitUser` association, not the shared habit catalog. Metadata changes
+immediately; schedule/goal edits take effect **the next account-local calendar
+day**, preserving original historical goals. Neither changes another user's
+configuration, the habit ID/slug, or existing log keys and dates.
 
 ## Quick path
 
@@ -20,8 +22,9 @@ Edit an owned habit with `PATCH /habits/:habitId/definition`:
 
 This changes the personal title, clears category and preserves the omitted icon.
 The definition response uses the detail shape: `habitId`, `title`, `slug`, `active`,
-and any stored optional metadata. An empty definition patch reads the owned
-habit without changing it.
+and any stored optional metadata. Versioned habits also include `configuration`
+and, when a future change exists, `pendingConfiguration` (see below). An empty
+definition patch reads the owned habit without changing it.
 
 ## Validation and compatibility
 
@@ -47,17 +50,99 @@ fields; this is current display metadata, not a historical title snapshot.
 Creating a habit retains the existing slug-based catalog identity. Catalog
 upserts set title/slug only on insertion. A new or reactivated association stores
 the submitted personal title and supplied metadata, becomes active, and keeps
-unspecified metadata. The create response remains the association object.
-Renaming via the definition route does not recompute the catalog slug.
+unspecified metadata. The create response retains association fields, but exposes current/pending
+configuration instead of the raw revision array. Renaming via the definition
+route does not recompute the catalog slug.
+
+## Configure a schedule and goal
+
+Send a **complete** `configuration` bundle on create or to
+`PATCH /habits/:habitId/definition`. Schedule-only and goal-only patches are
+invalid; omitting the bundle preserves configuration and appends no revision.
+
+```json
+{
+  "configuration": {
+    "schedule": { "kind": "weekly", "timesPerWeek": 3 },
+    "goal": { "kind": "quantity", "target": 20, "unit": "pages" }
+  }
+}
+```
+
+| Configuration | Accepted shape |
+| --- | --- |
+| Daily | `{"kind":"daily"}` |
+| Selected weekdays | `{"kind":"weekdays","days":[1,3,7]}`; distinct nonempty ISO days, Monday=1 through Sunday=7. |
+| Weekly quota | `{"kind":"weekly","timesPerWeek":3}`; integer 1–7 **completed days**, not a weekly sum of quantities. |
+| Checkbox goal | `{"kind":"checkbox"}`; semantic per-day target 1 (do not send `target` or `unit`). |
+| Quantity goal | `{"kind":"quantity","target":20,"unit":"pages"}`; finite positive number <=1e9 and custom trimmed unit of 1–32 characters. |
+
+Quantity targets apply **per recorded day/occurrence**. For the example above,
+a completed day requires 20 pages and the weekly quota requires three such
+days; recording 60 pages on one day does not fulfill three days. T3 will add
+measured recording and goal-aware evaluation; current completion booleans are
+not changed by T2.
+
+Unknown/irrelevant fields, null, numeric strings, duplicate weekdays, fractional
+weekly quotas and incomplete bundles are rejected. Configuration cannot change
+ownership, catalog identity or lifecycle state.
+
+## Effective dates and pending changes
+
+A newly inserted association starts with the submitted configuration effective
+**today** in the account timezone (UTC when omitted). With no bundle, it starts
+with daily checkbox. Repeated `POST /habits` updates supplied metadata and
+reactivates, but **never changes an existing association's revisions**, including
+legacy associations without revisions. Use the definition PATCH to change them.
+
+Each definition configuration edit atomically appends a complete revision with
+a stable generated ObjectId string `revisionId` and `effectiveFrom` calendar
+label (`YYYY-MM-DD`). It becomes effective tomorrow in the account timezone,
+using calendar arithmetic rather than a 24-hour duration across DST. Earlier
+revisions are retained. For any record date, select the greatest applicable
+effective date; equal-date revisions use the final persisted array position.
+Multiple edits today therefore leave today's goal unchanged and the last
+persisted edit wins tomorrow.
+
+Detail, definition and active-list reads on versioned associations show:
+
+```json
+{
+  "configuration": {
+    "schedule": { "kind": "daily" },
+    "goal": { "kind": "checkbox" }
+  },
+  "pendingConfiguration": {
+    "revisionId": "000000000000000000000001",
+    "effectiveFrom": "2025-04-02",
+    "configuration": {
+      "schedule": { "kind": "weekly", "timesPerWeek": 3 },
+      "goal": { "kind": "quantity", "target": 20, "unit": "pages" }
+    }
+  }
+}
+```
+
+`pendingConfiguration` is absent when no future revision exists; otherwise it
+shows the nearest upcoming date's winning revision. These reads do not expose
+all raw revisions; the legacy deactivation response also uses current/pending
+configuration without changing its deactivation semantics. Legacy associations
+without revisions preserve their old
+response shape: clients derive daily checkbox. The same fallback applies to
+**all dates before the first revision**, without inventing an association birth
+date or migrating existing rows. Inactive owned definitions remain editable.
 
 ## Scope and verification
 
-This unit does not introduce schedules, targets, goal history, measured progress,
-pause/archive semantics or log correction. Existing calendar and lifecycle
-behavior is retained.
+T2 persists configuration history and exports pure date-based resolution for
+T3. It does **not yet** implement measured progress, historical log snapshots,
+goal-aware completion/correction, notes, schedule enforcement, pause/archive or
+frontend controls. Full original-history acceptance still requires T3; existing
+stored completion booleans and log mutations remain unchanged.
 
-Deterministic service, DTO and controller tests cover owner filters, insert-only
-catalog updates, title fallback, validation/clearing, creation/reactivation and
-route compatibility. Aggregate tests inspect Mongo pipeline contracts; they do
-not prove execution against a live MongoDB. Existing mocked HTTP regressions run
-without a real database or private environment configuration.
+Deterministic helper, schema, service, DTO and controller tests cover strict
+bundles, dates/timezones/DST, original-goal selection, pending changes, legacy
+fallback, immutability, insert-only initialization and owner-scoped atomic
+append contracts. Aggregate/update tests inspect Mongo contracts, not execution
+against live MongoDB. Existing synthetic HTTP regressions run without a real
+database or private environment configuration.

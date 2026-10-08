@@ -1,11 +1,9 @@
 import { Transform } from 'class-transformer';
 import { IsString, MaxLength, MinLength } from 'class-validator';
-import {
-  PersonalHabitMetadataDto,
-  trimPersonalText,
-} from './personal-habit-metadata.dto';
+import { trimPersonalText } from './personal-habit-metadata.dto';
+import { HabitConfigurationDto } from './habit-configuration.dto';
 
-export class CreateHabitDto extends PersonalHabitMetadataDto {
+export class CreateHabitDto extends HabitConfigurationDto {
   @Transform(trimPersonalText)
   @IsString()
   @MinLength(3)

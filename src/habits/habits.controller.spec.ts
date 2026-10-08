@@ -118,6 +118,39 @@ describe('Personal definition controller plumbing', () => {
     expect(service.update).not.toHaveBeenCalled();
   });
 
+  it('forwards a complete configuration edit without interpreting it as a log mutation', async () => {
+    const configuration = {
+      schedule: { kind: 'weekly', timesPerWeek: 3 },
+      goal: { kind: 'quantity', target: 20, unit: ' pages ' },
+    };
+    const dto = (await pipe.transform(
+      { configuration },
+      { type: 'body', metatype: UpdateHabitUserDto },
+    )) as UpdateHabitUserDto;
+    await controller.updateDefinition(habitId, dto, user);
+    expect(service.updateDefinition).toHaveBeenCalledWith(
+      habitId,
+      {
+        configuration: {
+          ...configuration,
+          goal: { ...configuration.goal, unit: 'pages' },
+        },
+      },
+      user,
+    );
+    expect(service.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects partial configurations at the controller validation boundary', async () => {
+    await expect(
+      pipe.transform(
+        { configuration: { goal: { kind: 'checkbox' } } },
+        { type: 'body', metatype: UpdateHabitUserDto },
+      ),
+    ).rejects.toThrow();
+    expect(service.updateDefinition).not.toHaveBeenCalled();
+  });
+
   it('keeps the original empty PATCH as deactivation', async () => {
     const handler = Object.getOwnPropertyDescriptor(
       HabitsController.prototype,
