@@ -131,6 +131,30 @@ response shape: clients derive daily checkbox. The same fallback applies to
 **all dates before the first revision**, without inventing an association birth
 date or migrating existing rows. Inactive owned definitions remain editable.
 
+## Check today manually
+
+Use bodyless `POST /habits/:habitId/check` (or `{}`) for the minimal daily
+checkbox. Authentication, a valid habit ID and **active owned** association are
+required. Paused/archived habits return 404 even with a stale `active: true`.
+Nonempty bodies are rejected; there is no client-selected date. The account-local
+day is captured before database operations.
+
+This explicit operation deliberately bypasses quantity thresholds and selected-
+weekday schedules. It sets `completed: true` and optional `manualCompletion: true`,
+without claiming a measured target was reached. Existing amounts, notes, original
+snapshots, date labels and log identity are preserved. New records atomically
+insert the date-effective original snapshot, without inventing quantities or
+revision metadata. Repeated checks are idempotent. A concurrent insertion keeps
+its winning snapshot and data; lost identity after undo returns 409 rather than
+recreating the record or overwriting a replacement.
+
+`manualCompletion` has no default, migration or backfill. Owned history, owner-
+wide summaries and recorded weekly days expose it only when stored. Notes-only
+corrections retain it; successful calculated `/complete` or explicit `amount`/
+`completed` corrections unset it and use the original goal as before. The legacy
+bodyless `/complete` still rejects quantity goals. `DELETE /habits/:habitId/incomplete`
+remains today's whole-record undo, including manual and legacy records.
+
 ## Record today's progress
 
 Use `POST /habits/:habitId/complete` on an **active, owned** habit:
@@ -229,6 +253,7 @@ The response contract is:
     date: string;               // Seven ascending labels, Monday–Sunday
     scheduled: boolean;
     completed: boolean;
+    manualCompletion?: boolean; // Present only when stored, not derived
     amount?: number;
     note?: string;
     configurationSnapshot: {
@@ -294,9 +319,10 @@ retains its existing deletion contract; it is not a lifecycle operation.
 
 ## Scope and verification
 
-Current-day measured recording, original snapshots, notes, historical correction,
-weekly reads and association lifecycle are implemented. Frontend controls remain
-later work; there is no bulk migration or automatic recalculation of history.
+Manual daily checks, current-day measured recording, original snapshots, notes,
+historical correction, weekly reads and association lifecycle are implemented.
+Frontend controls remain later work; there is no bulk migration or automatic
+recalculation of history.
 
 Deterministic helper, schema, service, DTO, controller and synthetic HTTP tests
 cover strict validation, dates/timezones/DST, original goals, pending changes,

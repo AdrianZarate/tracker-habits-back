@@ -1,4 +1,8 @@
-import { RequestMethod, ValidationPipe } from '@nestjs/common';
+import {
+  BadRequestException,
+  RequestMethod,
+  ValidationPipe,
+} from '@nestjs/common';
 import {
   GUARDS_METADATA,
   METHOD_METADATA,
@@ -52,6 +56,7 @@ describe('Personal definition controller plumbing', () => {
   const service = {
     create: jest.fn(),
     complete: jest.fn(),
+    check: jest.fn(),
     updateLog: jest.fn(),
     getWeek: jest.fn(),
     update: jest.fn(),
@@ -160,6 +165,48 @@ describe('Personal definition controller plumbing', () => {
     ).rejects.toThrow();
     expect(service.updateDefinition).not.toHaveBeenCalled();
   });
+
+  it('exposes a distinct authenticated manual check with the Mongo-ID pipe', async () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      HabitsController.prototype,
+      'check',
+    )!.value as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(':habitId/check');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.POST,
+    );
+    const args = Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      HabitsController,
+      'check',
+    ) as Record<string, { index: number; pipes: unknown[] }>;
+    expect(Object.values(args)).toContainEqual(
+      expect.objectContaining({ index: 0, pipes: [ParseMongoIdPipe] }),
+    );
+    for (const body of [undefined, {}]) {
+      await controller.check(habitId, body, user);
+      expect(service.check).toHaveBeenLastCalledWith(habitId, user);
+    }
+    expect(service.complete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    null,
+    [],
+    'text',
+    1,
+    false,
+    { amount: 1 },
+    { manualCompletion: true },
+  ])(
+    'rejects nonempty or invalid manual check body %j before service invocation',
+    (body) => {
+      expect(() => controller.check(habitId, body, user)).toThrow(
+        BadRequestException,
+      );
+      expect(service.check).not.toHaveBeenCalled();
+    },
+  );
 
   it('uses the completion DTO and forwards only validated daily progress', async () => {
     expect(

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
@@ -87,6 +88,24 @@ export class HabitsController {
     @GetUser() user: User,
   ) {
     return this.habitsService.update(habitId, user);
+  }
+
+  @Post(':habitId/check')
+  @ApiOperation({ summary: 'Marcar hoy manualmente, sin cantidad ni horario' })
+  check(
+    @Param('habitId', ParseMongoIdPipe) habitId: string,
+    @Body() body: unknown,
+    @GetUser() user: User,
+  ) {
+    if (
+      body !== undefined &&
+      (typeof body !== 'object' ||
+        body === null ||
+        Array.isArray(body) ||
+        Object.keys(body).length > 0)
+    )
+      throw new BadRequestException('Expected an empty body');
+    return this.habitsService.check(habitId, user);
   }
 
   @Post(':habitId/complete')

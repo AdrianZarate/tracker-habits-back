@@ -281,6 +281,9 @@ describe('Isolated HTTP security and habit contracts', () => {
               slug: habit.slug,
               date: row.date,
               completed: row.completed,
+              ...(row.manualCompletion !== undefined
+                ? { manualCompletion: row.manualCompletion }
+                : {}),
               ...(row.amount !== undefined ? { amount: row.amount } : {}),
               ...(row.note !== undefined ? { note: row.note } : {}),
               ...(row.configurationSnapshot !== undefined
@@ -306,6 +309,124 @@ describe('Isolated HTTP security and habit contracts', () => {
   const range = (habitId: Types.ObjectId, start: string, end: string) => ({
     ...scope(habitId),
     date: { $gte: anchor(start), $lte: anchor(end) },
+  });
+
+  describe('manual daily check', () => {
+    const original = {
+      revisionId: id(50).toHexString(),
+      effectiveFrom: '2025-03-01',
+      configuration: {
+        schedule: { kind: 'weekdays', days: [7] },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      },
+    };
+
+    it('preserves measured history and supports notes, calculated progress and today undo', async () => {
+      associations[0].configurationRevisions = [original];
+      Object.assign(logs[1], {
+        amount: 2,
+        note: 'Original',
+        configurationSnapshot: original,
+      });
+      const before = json(logs);
+      const todayBefore = { ...logs[1] };
+      const first = await send('post', path(owned, '/check')).expect(201);
+      expect(first.body).toEqual(
+        json({ ...todayBefore, completed: true, manualCompletion: true }),
+      );
+      const repeat = await send('post', path(owned, '/check'))
+        .send({})
+        .expect(201);
+      expect(repeat.body).toEqual(first.body);
+      expect(json(logs.filter((row) => row !== logs[1]))).toEqual(
+        (before as Row[]).filter((row) => row._id !== id(21).toHexString()),
+      );
+      const history = await send('get', path(owned, '/logs')).expect(200);
+      expect(history.body).toEqual(expect.arrayContaining([first.body]));
+      const week = await send('get', path(owned, '/week')).expect(200);
+      expect((week.body as { days: Row[] }).days[0]).toMatchObject({
+        date: '2025-03-31',
+        manualCompletion: true,
+        amount: 2,
+        note: 'Original',
+      });
+      const summary = await send('get', '/habits/logs').expect(200);
+      expect(summary.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            _id: id(21).toHexString(),
+            manualCompletion: true,
+          }),
+        ]),
+      );
+      const notes = await send('patch', path(owned, '/logs/2025-03-31'))
+        .send({ note: 'Changed' })
+        .expect(200);
+      expect(notes.body).toMatchObject({ manualCompletion: true, amount: 2 });
+      const progress = await send('post', path(owned, '/complete'))
+        .send({ amount: 3 })
+        .expect(201);
+      expect(progress.body).toMatchObject({ amount: 3, completed: false });
+      expect(progress.body).not.toHaveProperty('manualCompletion');
+      await send('post', path(owned, '/check')).expect(201);
+      await send('delete', path(owned, '/incomplete')).expect(200);
+      expect(
+        logs.some((row) =>
+          matches(row, { ...scope(), date: anchor('2025-03-31') }),
+        ),
+      ).toBe(false);
+      const inserted = await send('post', path(owned, '/check')).expect(201);
+      expect(inserted.body).toMatchObject({
+        date: '2025-03-31T00:00:00.000Z',
+        completed: true,
+        manualCompletion: true,
+        configurationSnapshot: original,
+      });
+      expect(inserted.body).not.toHaveProperty('amount');
+      expect(inserted.body).not.toHaveProperty('note');
+      await send('post', path(owned, '/complete')).expect(400);
+      const correction = await send('patch', path(owned, '/logs/2025-03-31'))
+        .send({ amount: 1 })
+        .expect(200);
+      expect(correction.body).not.toHaveProperty('manualCompletion');
+    });
+
+    it.each([inactive, foreign, missing])(
+      'rejects non-active or non-owned habit %s',
+      async (habit) => {
+        await send('post', path(habit, '/check')).expect(404);
+        expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['paused', 'archived'])(
+      'rejects %s despite stale active=true',
+      async (status) => {
+        associations[0].status = status;
+        await send('post', path(owned, '/check')).expect(404);
+        expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { amount: 20 },
+      { completed: true },
+      { manualCompletion: true },
+      { date: '2025-04-02' },
+      [],
+    ])('rejects nonempty or invalid body %j', async (body) => {
+      await send('post', path(owned, '/check')).send(body).expect(400);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('requires authentication and a valid Mongo ID; exposes no date-specific check', async () => {
+      await request(app.getHttpServer())
+        .post(path(owned, '/check'))
+        .expect(401);
+      await send('post', '/habits/bad/check').expect(400);
+      await send('post', path(owned, '/check/2025-04-02')).expect(404);
+      expect(logModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
   });
 
   describe('lifecycle', () => {
@@ -891,7 +1012,7 @@ describe('Isolated HTTP security and habit contracts', () => {
     }
     expect(logModel.findOneAndUpdate).toHaveBeenCalledWith(
       { ...scope(), date: anchor('2025-03-31'), _id: id(21) },
-      { $set: { completed: true } },
+      { $set: { completed: true }, $unset: { manualCompletion: 1 } },
       { returnDocument: 'after', runValidators: true },
     );
     expect(logs).toHaveLength(5);

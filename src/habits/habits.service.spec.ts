@@ -717,6 +717,7 @@ describe('Owner-scoped habit calendar operations', () => {
             slug: '$habit.slug',
             date: 1,
             completed: 1,
+            manualCompletion: 1,
             amount: 1,
             note: { $ifNull: ['$note', '$$REMOVE'] },
             configurationSnapshot: 1,
@@ -1136,6 +1137,292 @@ describe('Owner-scoped habit calendar operations', () => {
     expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
+  describe('manual daily checks', () => {
+    const snapshot: ConfigurationRevision = {
+      revisionId: '000000000000000000000010',
+      effectiveFrom: '2025-03-01',
+      configuration: {
+        schedule: { kind: 'weekdays', days: [7] },
+        goal: { kind: 'quantity', target: 20, unit: 'pages' },
+      },
+    };
+    let stored: Record<string, unknown> | null;
+    const check = (user = account()) => service.check(id, user);
+    const correct = (dto: UpdateHabitLogDto) =>
+      service.updateLog(id, '2025-04-01', dto, account());
+
+    beforeEach(() => {
+      stored = null;
+      association.findOne.mockReturnValue(
+        query({
+          habitId,
+          active: true,
+          configurationRevisions: [snapshot],
+        }),
+      );
+      logs.findOne.mockImplementation(() => query(stored && { ...stored }));
+      logs.findOneAndUpdate.mockImplementation(
+        (
+          filter: { _id?: Types.ObjectId },
+          update: { $setOnInsert?: object; $set?: object; $unset?: object },
+          options: { upsert?: boolean },
+        ) => {
+          if (!stored && options.upsert)
+            stored = { _id: otherId, ...filter, ...update.$setOnInsert };
+          if (
+            !stored ||
+            (filter._id && !filter._id.equals(stored._id as Types.ObjectId))
+          )
+            return executableQuery(null);
+          Object.assign(stored, update.$set);
+          for (const key of Object.keys(update.$unset ?? {}))
+            delete stored[key];
+          return executableQuery({ ...stored });
+        },
+      );
+    });
+
+    afterEach(() => logs.findOneAndUpdate.mockReset());
+
+    it('checks unscheduled quantity habits without an amount and repeats idempotently', async () => {
+      const first = await check();
+      expect(first).toEqual({
+        _id: otherId,
+        userId: ownerId,
+        habitId,
+        date: anchor('2025-04-01'),
+        completed: true,
+        manualCompletion: true,
+        configurationSnapshot: snapshot,
+      });
+      expect(await check()).toEqual(first);
+      expect(logs.findOneAndUpdate).toHaveBeenNthCalledWith(
+        1,
+        { userId: ownerId, habitId, date: anchor('2025-04-01') },
+        {
+          $setOnInsert: {
+            completed: true,
+            manualCompletion: true,
+            configurationSnapshot: snapshot,
+          },
+        },
+        { upsert: true, returnDocument: 'after', runValidators: true },
+      );
+    });
+
+    it.each([true, false])(
+      'preserves existing identity, quantity, note and snapshot (snapshot=%s)',
+      async (hasSnapshot) => {
+        stored = {
+          _id: otherId,
+          userId: ownerId,
+          habitId,
+          date: anchor('2025-04-01'),
+          completed: false,
+          amount: 2,
+          note: 'Keep',
+          ...(hasSnapshot ? { configurationSnapshot: snapshot } : {}),
+        };
+        const original = { ...stored };
+        expect(await check()).toEqual({
+          ...original,
+          completed: true,
+          manualCompletion: true,
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+        expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
+          {
+            userId: ownerId,
+            habitId,
+            date: anchor('2025-04-01'),
+            _id: otherId,
+          },
+          { $set: { completed: true, manualCompletion: true } },
+          { returnDocument: 'after', runValidators: true },
+        );
+        expect(logs.deleteOne).not.toHaveBeenCalled();
+      },
+    );
+
+    it('captures account-today before awaited reads and chooses its original revision', async () => {
+      association.findOne.mockImplementation(() => {
+        jest.setSystemTime(new Date('2025-04-02T08:00:00Z'));
+        return query({
+          habitId,
+          active: true,
+          configurationRevisions: [
+            snapshot,
+            { ...snapshot, effectiveFrom: '2025-04-01' },
+          ],
+        });
+      });
+      expect(await check(account('America/Los_Angeles'))).toMatchObject({
+        date: anchor('2025-03-31'),
+        configurationSnapshot: snapshot,
+      });
+    });
+
+    it('inserts legacy fallback without invented revision IDs, quantities or notes', async () => {
+      association.findOne.mockReturnValue(query({ habitId, active: true }));
+      const result = await check();
+      expect(result.configurationSnapshot).toEqual({
+        configuration: {
+          schedule: { kind: 'daily' },
+          goal: { kind: 'checkbox' },
+        },
+      });
+      expect(result).not.toHaveProperty('amount');
+      expect(result).not.toHaveProperty('note');
+    });
+
+    it.each([
+      null,
+      { active: false },
+      { active: true, status: 'paused' },
+      { active: true, status: 'archived' },
+    ])('rejects missing/foreign or inactive ownership %j', async (row) => {
+      association.findOne.mockReturnValue(query(row));
+      await expect(check()).rejects.toBeInstanceOf(NotFoundException);
+      expect(association.findOne).toHaveBeenCalledWith({
+        userId: ownerId,
+        habitId,
+      });
+      expect(logs.findOne).not.toHaveBeenCalled();
+      expect(logs.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'preserves a concurrent insert winner (duplicate=%s)',
+      async (duplicate) => {
+        const winner = {
+          configuration: {
+            schedule: { kind: 'daily' },
+            goal: { kind: 'checkbox' },
+          },
+        };
+        logs.findOneAndUpdate.mockImplementationOnce(() => {
+          stored = {
+            _id: otherId,
+            amount: 0,
+            note: 'Winner',
+            completed: false,
+            configurationSnapshot: winner,
+          };
+          const error = Object.assign(new Error('duplicate'), { code: 11000 });
+          return duplicate
+            ? { lean: () => ({ exec: () => Promise.reject(error) }) }
+            : executableQuery({ ...stored });
+        });
+        expect(await check()).toEqual({
+          _id: otherId,
+          amount: 0,
+          note: 'Winner',
+          completed: true,
+          manualCompletion: true,
+          configurationSnapshot: winner,
+        });
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(2);
+        expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ _id: otherId }),
+          { $set: { completed: true, manualCompletion: true } },
+          { returnDocument: 'after', runValidators: true },
+        );
+      },
+    );
+
+    it('fails 409 if a duplicate insert winner disappears, without another upsert', async () => {
+      const error = Object.assign(new Error('duplicate'), { code: 11000 });
+      logs.findOneAndUpdate.mockReturnValueOnce({
+        lean: () => ({ exec: () => Promise.reject(error) }),
+      });
+      await expect(check()).rejects.toBeInstanceOf(ConflictException);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([false, true])(
+      'fails 409 if undo removes/replaces the observed identity (replacement=%s)',
+      async (replacement) => {
+        stored = { _id: otherId, completed: false };
+        const next = replacement
+          ? { _id: new Types.ObjectId(), completed: false }
+          : null;
+        logs.findOneAndUpdate.mockImplementationOnce(() => {
+          stored = next;
+          return executableQuery(null);
+        });
+        await expect(check()).rejects.toBeInstanceOf(ConflictException);
+        expect(stored).toEqual(next);
+        expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('propagates non-duplicate database errors without retry', async () => {
+      const error = new Error('synthetic failure');
+      logs.findOneAndUpdate.mockReturnValueOnce({
+        lean: () => ({ exec: () => Promise.reject(error) }),
+      });
+      await expect(check()).rejects.toBe(error);
+      expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('retains provenance for notes-only but clears it for explicit measured progress', async () => {
+      await check();
+      expect(await correct({ note: 'Keep' })).toMatchObject({
+        completed: true,
+        manualCompletion: true,
+        note: 'Keep',
+      });
+      expect(await correct({ note: '' })).toHaveProperty(
+        'manualCompletion',
+        true,
+      );
+      expect(await correct({ amount: 2 })).not.toHaveProperty(
+        'manualCompletion',
+      );
+      await check();
+      expect(
+        await service.complete(id, account(), { amount: 3 }),
+      ).not.toHaveProperty('manualCompletion');
+      expect(stored).toMatchObject({
+        amount: 3,
+        completed: false,
+        configurationSnapshot: snapshot,
+      });
+    });
+
+    it('clears provenance on explicit checkbox corrections and legacy bodyless completion', async () => {
+      association.findOne.mockReturnValue(query({ habitId, active: true }));
+      await check();
+      expect(await correct({ completed: false, note: '' })).not.toHaveProperty(
+        'manualCompletion',
+      );
+      await check();
+      expect(await service.complete(id, account())).not.toHaveProperty(
+        'manualCompletion',
+      );
+      expect(stored).not.toHaveProperty('amount');
+    });
+
+    it('exposes optional provenance in owned history, weekly days and owner-wide projection', async () => {
+      const row = await check();
+      logs.find.mockReturnValue(executableQuery([row]));
+      expect(await service.getLogs(id, account(), {})).toEqual([row]);
+      const week = await service.getWeek(id, account());
+      expect(week.days[1]).toHaveProperty('manualCompletion', true);
+      expect(week.days[0]).not.toHaveProperty('manualCompletion');
+      logs.aggregate.mockResolvedValue([]);
+      await service.getLogsByUser(account());
+      const calls = logs.aggregate.mock.calls as unknown[][];
+      const pipeline = calls[0][0] as {
+        $project?: { manualCompletion?: number };
+      }[];
+      expect(pipeline.find((stage) => stage.$project)?.$project).toHaveProperty(
+        'manualCompletion',
+        1,
+      );
+    });
+  });
+
   describe('current-day measured records', () => {
     const configuration: HabitConfiguration = {
       schedule: { kind: 'daily' },
@@ -1248,7 +1535,10 @@ describe('Owner-scoped habit calendar operations', () => {
       });
       expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ userId: ownerId, habitId, _id: otherId }),
-        { $set: { amount: 15, completed: false } },
+        {
+          $set: { amount: 15, completed: false },
+          $unset: { manualCompletion: 1 },
+        },
         { returnDocument: 'after', runValidators: true },
       );
     });
@@ -1401,7 +1691,10 @@ describe('Owner-scoped habit calendar operations', () => {
         expect(logs.findOneAndUpdate).toHaveBeenCalledTimes(2);
         expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
           expect.objectContaining({ _id: otherId }),
-          { $set: { amount: 20, completed: false } },
+          {
+            $set: { amount: 20, completed: false },
+            $unset: { manualCompletion: 1 },
+          },
           { returnDocument: 'after', runValidators: true },
         );
       },
@@ -1557,7 +1850,7 @@ describe('Owner-scoped habit calendar operations', () => {
             date: anchor('2025-03-31'),
             _id: otherId,
           },
-          { $set: { amount, completed } },
+          { $set: { amount, completed }, $unset: { manualCompletion: 1 } },
           { returnDocument: 'after', runValidators: true },
         );
       }
@@ -1850,7 +2143,10 @@ describe('Owner-scoped habit calendar operations', () => {
         });
         expect(logs.findOneAndUpdate).toHaveBeenLastCalledWith(
           expect.objectContaining({ _id: otherId }),
-          { $set: { amount: 20, completed: false } },
+          {
+            $set: { amount: 20, completed: false },
+            $unset: { manualCompletion: 1 },
+          },
           { returnDocument: 'after', runValidators: true },
         );
       },
@@ -1975,7 +2271,7 @@ describe('Owner-scoped habit calendar operations', () => {
     );
     expect(logs.findOneAndUpdate).toHaveBeenCalledWith(
       { userId: ownerId, habitId, date: anchor(day), _id: undefined },
-      { $set: { completed: true } },
+      { $set: { completed: true }, $unset: { manualCompletion: 1 } },
       { returnDocument: 'after', runValidators: true },
     );
     expect(association.findOne).toHaveBeenCalledWith({

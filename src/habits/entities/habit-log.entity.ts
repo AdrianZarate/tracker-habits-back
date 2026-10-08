@@ -39,6 +39,13 @@ export class HabitLog extends Document {
   @Prop({ type: Boolean, default: true })
   completed: boolean;
 
+  // Optional provenance only: no default or backfill on existing records.
+  @Prop({
+    type: Boolean,
+    validate: (value: unknown) => typeof value === 'boolean',
+  })
+  manualCompletion?: boolean;
+
   // Mixed prevents Mongoose from accepting numeric strings by casting them.
   @Prop({
     type: MongooseSchema.Types.Mixed,

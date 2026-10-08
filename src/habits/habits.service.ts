@@ -53,7 +53,12 @@ type HabitListRow = Pick<
 /** Shape produced by the global-habit lookup and log projection below. */
 type HabitLogSummary = Pick<
   HabitLog,
-  'date' | 'completed' | 'amount' | 'note' | 'configurationSnapshot'
+  | 'date'
+  | 'completed'
+  | 'manualCompletion'
+  | 'amount'
+  | 'note'
+  | 'configurationSnapshot'
 > &
   Pick<Habit, 'title' | 'slug'> & {
     _id: Types.ObjectId;
@@ -401,6 +406,63 @@ export class HabitsService {
     return this.associationView(habitUser, today);
   }
 
+  async check(habitId: string, user: User) {
+    // Capture the account day before any awaited work, just like complete.
+    const day = calendarDay(new Date(), user.timeZone ?? 'UTC');
+    const filter = {
+      userId: user._id,
+      habitId: new Types.ObjectId(habitId),
+      date: dayLabelToUtcAnchor(day),
+    };
+    const habitUser = await this.habitUserModel
+      .findOne({ userId: filter.userId, habitId: filter.habitId })
+      .lean();
+    if (!habitUser || this.lifecycleStatus(habitUser) !== 'active')
+      throw new NotFoundException('Habit not active for this user');
+
+    const progress = { completed: true, manualCompletion: true };
+    let log = await this.habitLogModel.findOne(filter).lean();
+    if (!log) {
+      const snapshot = resolveConfigurationForDate(
+        habitUser.configurationRevisions,
+        day,
+      );
+      try {
+        // Deliberately bypass quantity/schedule gates. Insert-only authority
+        // preserves the unique day's winning snapshot, amount and notes.
+        log = await this.habitLogModel
+          .findOneAndUpdate(
+            filter,
+            { $setOnInsert: { configurationSnapshot: snapshot, ...progress } },
+            { upsert: true, returnDocument: 'after', runValidators: true },
+          )
+          .lean()
+          .exec();
+      } catch (error: unknown) {
+        if (
+          typeof error !== 'object' ||
+          error === null ||
+          !('code' in error) ||
+          error.code !== 11000
+        )
+          throw error;
+        log = await this.habitLogModel.findOne(filter).lean();
+      }
+    }
+    if (!log) throw new ConflictException('Habit log changed; retry check');
+    const result = await this.habitLogModel
+      .findOneAndUpdate(
+        { ...filter, _id: log._id },
+        { $set: progress },
+        { returnDocument: 'after', runValidators: true },
+      )
+      .lean()
+      .exec();
+    // Never recreate or overwrite another identity after concurrent undo.
+    if (!result) throw new ConflictException('Habit log changed; retry check');
+    return result;
+  }
+
   async complete(habitId: string, user: User, dto: CompleteHabitDto = {}) {
     // Capture the account day once, before any awaited read or write.
     const day = calendarDay(new Date(), user.timeZone ?? 'UTC');
@@ -460,7 +522,7 @@ export class HabitsService {
     return this.habitLogModel
       .findOneAndUpdate(
         { ...filter, _id: log._id },
-        { $set: progress },
+        { $set: progress, $unset: { manualCompletion: 1 } },
         { returnDocument: 'after', runValidators: true },
       )
       .lean()
@@ -574,12 +636,16 @@ export class HabitsService {
               : resolved().configuration,
           );
     const $set = { ...progress, ...(note ? { note } : {}) };
+    const $unset = {
+      ...(Object.keys(progress).length ? { manualCompletion: 1 } : {}),
+      ...(note === '' ? { note: 1 } : {}),
+    };
     const result = await this.habitLogModel
       .findOneAndUpdate(
         { ...filter, _id: log._id },
         {
           ...(Object.keys($set).length ? { $set } : {}),
-          ...(note === '' ? { $unset: { note: 1 } } : {}),
+          ...(Object.keys($unset).length ? { $unset } : {}),
         },
         { returnDocument: 'after', runValidators: true },
       )
@@ -682,6 +748,9 @@ export class HabitsService {
         date: day,
         scheduled: scheduledOnDate(day, configurationSnapshot.configuration),
         completed: log?.completed ?? false,
+        ...(log?.manualCompletion !== undefined
+          ? { manualCompletion: log.manualCompletion }
+          : {}),
         ...(log?.amount !== undefined ? { amount: log.amount } : {}),
         ...(log?.note !== undefined ? { note: log.note } : {}),
         configurationSnapshot,
@@ -809,6 +878,7 @@ export class HabitsService {
           slug: '$habit.slug',
           date: 1,
           completed: 1,
+          manualCompletion: 1,
           amount: 1,
           note: { $ifNull: ['$note', '$$REMOVE'] },
           configurationSnapshot: 1,

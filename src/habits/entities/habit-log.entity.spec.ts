@@ -30,10 +30,36 @@ describe('HabitLog measured schema (no DB)', () => {
   it('preserves missing optional fields on legacy records', async () => {
     const row = fixture();
     await expect(row.validate()).resolves.toBeUndefined();
+    expect(row.toObject()).not.toHaveProperty('manualCompletion');
     expect(row.toObject()).not.toHaveProperty('note');
     expect(row.toObject()).not.toHaveProperty('amount');
     expect(row.toObject()).not.toHaveProperty('configurationSnapshot');
   });
+
+  it.each([true, false])(
+    'stores optional Boolean provenance %s',
+    async (manualCompletion) => {
+      const row = fixture({ manualCompletion });
+      await expect(row.validate()).resolves.toBeUndefined();
+      expect(row.toObject()).toHaveProperty(
+        'manualCompletion',
+        manualCompletion,
+      );
+    },
+  );
+
+  it('uses normal Boolean casting for provenance, not Mixed', async () => {
+    const row = fixture({ manualCompletion: 'true' });
+    await expect(row.validate()).resolves.toBeUndefined();
+    expect(row.toObject()).toHaveProperty('manualCompletion', true);
+  });
+
+  it.each([null, 'invalid', {}, []])(
+    'rejects invalid Boolean provenance %j',
+    async (manualCompletion) => {
+      await expect(fixture({ manualCompletion }).validate()).rejects.toThrow();
+    },
+  );
 
   it.each([0, 0.5, 1e9])(
     'accepts amount %s and the full snapshot',
