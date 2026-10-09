@@ -1,0 +1,20 @@
+# Only send inputs required by the Nest build.
+**
+!package.json
+!yarn.lock
+!nest-cli.json
+!tsconfig.json
+!tsconfig.build.json
+!src/
+!src/**
+
+# Keep sensitive/generated files excluded even beneath src.
+**/.env*
+**/*.pem
+**/*.key
+**/.git
+**/node_modules
+**/dist
+**/mongo
+**/.codegraph
+**/odd
