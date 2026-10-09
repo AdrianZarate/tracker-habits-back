@@ -18,8 +18,7 @@ async function bootstrap() {
 
   app.enableCors({
     origin: [
-      'https://tracker-habits.alexadrian.dev',
-      'https://dynamic-nasturtium-c7a358.netlify.app',
+      'https://habit-tracker.systemautomatic.xyz',
       'http://localhost:5173',
     ],
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
